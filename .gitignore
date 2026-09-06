@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Environnements virtuels
+.venv/
+venv/
+
+# Outils de qualité
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.hypothesis/
+.coverage
+coverage.xml
+htmlcov/
+
+# Données locales
+*.db
+*.sqlite
+*.sqlite3
+!tests/fixtures/*.db
+
+# Secrets
+.env
+
+# Documentation générée
+site/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
