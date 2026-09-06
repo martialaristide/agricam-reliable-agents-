@@ -68,7 +68,15 @@ class ToolCall:
 
 @dataclass(frozen=True, slots=True)
 class AgentResult:
-    """Résultat brut d'une exécution d'agent sur une tâche donnée."""
+    """
+    Résultat brut d'une exécution d'agent sur une tâche donnée.
+
+    `error` est renseigné quand l'essai s'est terminé sur une défaillance
+    d'infrastructure (ex. LLM injoignable après retries) plutôt que sur
+    une réponse du modèle. L'essai compte alors comme un échec dans le
+    harnais, sans interrompre la campagne : une campagne de fiabilité doit
+    mesurer les pannes, pas s'arrêter à la première.
+    """
 
     task_id: str
     trial_id: int
@@ -78,6 +86,7 @@ class AgentResult:
     latency_ms: float
     cost_usd: float
     max_steps_exceeded: bool = False
+    error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
