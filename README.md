@@ -48,6 +48,53 @@ complet, et affiche p̂, l'intervalle de Wilson et pass^k(1, 3, 5, 10) —
 démontrant numériquement l'effondrement de la fiabilité avec la longueur
 de la tâche (cf. document de spécification théorique).
 
+## Serveur MCP (protocole réel, transport stdio)
+
+Les 5 outils AgriCam sont exposés via un serveur conforme au SDK officiel
+`mcp` (`src/agricam_reliable_agents/mcp_tools/server.py`). Il démarre sur
+stdio avec un store de démonstration pré-rempli :
+
+```bash
+PYTHONPATH=src python -m agricam_reliable_agents.mcp_tools.server
+```
+
+### Connexion à Claude Desktop
+
+Ajouter dans `claude_desktop_config.json` (menu *Settings → Developer →
+Edit Config*) :
+
+```json
+{
+  "mcpServers": {
+    "agricam": {
+      "command": "/chemin/vers/.venv/bin/python",
+      "args": ["-m", "agricam_reliable_agents.mcp_tools.server"],
+      "env": { "PYTHONPATH": "/chemin/vers/agricam/src" }
+    }
+  }
+}
+```
+
+Sous Windows, utiliser `C:\\chemin\\vers\\.venv\\Scripts\\python.exe`.
+Redémarrer Claude Desktop : les outils `get_sensor_data`,
+`get_diagnostic_history`, `recommend_treatment`, `check_marketplace_stock`
+et `notify_farmer` apparaissent dans le sélecteur d'outils.
+
+### Connexion via l'API Claude (connecteur MCP)
+
+Le connecteur MCP de l'API Messages n'accepte que des serveurs HTTP
+distants. Pour exposer ce serveur au-delà de la machine locale, le
+brancher derrière le transport `streamable_http` du SDK (voir
+`Server.streamable_http_app()`) et le déclarer côté API avec
+`mcp_servers=[{"type": "url", "url": ..., "name": "agricam"}]` et
+`tools=[{"type": "mcp_toolset", "mcp_server_name": "agricam"}]`.
+
+### Test automatisé
+
+`tests/test_mcp_server.py` vérifie `list_tools` (5 outils) et des appels
+réels (`get_sensor_data`, `recommend_treatment`, erreurs métier) à la fois
+en mémoire et en lançant le vrai module en sous-processus stdio.
+
 ## Structure
 
 ```
