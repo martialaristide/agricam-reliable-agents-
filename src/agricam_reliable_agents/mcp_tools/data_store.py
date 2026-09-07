@@ -1,19 +1,23 @@
 """
-Store de données AgriCam en mémoire.
+Store de données AgriCam en mémoire, et contrat commun `DataStore`.
 
-En production, cette classe serait remplacée par une couche d'accès à la
-vraie base AgriCam (PostgreSQL, cf. section infrastructure). L'interface
-publique (les méthodes get_*/set_*) est volontairement identique à ce que
-serait un repository réel, pour que les outils MCP n'aient aucune
-modification à faire lors de la bascule vers la production — seul
-`AgriCamDataStore.__init__` changerait (connexion DB au lieu de dicts).
+Deux implémentations coexistent :
+- `AgriCamDataStore` (ce module) : dictionnaires en mémoire, pour les
+  tests unitaires et la démonstration ;
+- `SqlAlchemyDataStore` (mcp_tools/sql_store.py) : SQLite ou PostgreSQL,
+  pour les campagnes persistées et le serveur MCP configuré par
+  `AGRICAM_DATABASE_URL`.
+
+Les outils MCP (`AgriCamTools`) ne dépendent que du protocole `DataStore`
+défini en fin de module : basculer de l'une à l'autre ne demande aucune
+modification des outils ni de la boucle agent.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Literal, Protocol
 
 MetricName = Literal["humidity", "temperature", "soil_ph"]
 
@@ -85,7 +89,9 @@ class AgriCamDataStore:
         self._parcel_farmer["P-003"] = "F-001"
 
     # ---- Lecture ---------------------------------------------------------
-    def get_sensor_data(self, parcel_id: str, metric: MetricName | Literal["all"] = "all"):
+    def get_sensor_data(
+        self, parcel_id: str, metric: MetricName | Literal["all"] = "all"
+    ) -> list[SensorReading]:
         readings = [r for r in self._sensor_readings if r.parcel_id == parcel_id]
         if metric != "all":
             readings = [r for r in readings if r.metric == metric]
@@ -143,3 +149,35 @@ class AgriCamDataStore:
         for farmer_id, farmer in self._farmers.items():
             state[f"farmer.{farmer_id}.notified_count"] = len(farmer.notified_messages)
         return state
+
+
+class DataStore(Protocol):
+    """
+    Contrat minimal attendu par `AgriCamTools` et par le harnais (via
+    `snapshot`). Toute implémentation doit lever `AgriCamDataError` pour
+    une entité inconnue ou un stock insuffisant.
+    """
+
+    def seed_demo_data(self) -> None: ...
+
+    def get_sensor_data(
+        self, parcel_id: str, metric: MetricName | Literal["all"] = "all"
+    ) -> list[SensorReading]: ...
+
+    def get_diagnostic(self, diagnostic_id: str) -> Diagnostic: ...
+
+    def get_diagnostic_history(
+        self, parcel_id: str | None = None, limit: int = 20
+    ) -> list[Diagnostic]: ...
+
+    def get_product(self, product_id: str) -> MarketplaceProduct: ...
+
+    def get_farmer_for_parcel(self, parcel_id: str) -> Farmer: ...
+
+    def mark_diagnostic_treated(self, diagnostic_id: str) -> None: ...
+
+    def decrement_stock(self, product_id: str, quantity: int = 1) -> None: ...
+
+    def notify_farmer(self, farmer_id: str, message: str) -> None: ...
+
+    def snapshot(self) -> dict[str, object]: ...

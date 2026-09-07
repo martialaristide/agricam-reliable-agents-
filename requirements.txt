@@ -4,11 +4,21 @@
 # Agent réel (agent/llm_client.py, AnthropicLLMClient) :
 anthropic>=0.40.0
 
+# Serveur MCP (mcp_tools/server.py, SDK officiel, transport stdio) :
+mcp>=2.0.0
+anyio>=4.0.0
+
+# Persistance (mcp_tools/sql_store.py, reliability/repository.py) :
+# SQLite via la bibliothèque standard ; PostgreSQL via un pilote à installer
+# séparément (ex. psycopg[binary]).
+sqlalchemy>=2.0.0
+
 # Développement / tests
 pytest>=8.0.0
 pytest-cov>=5.0.0
 ruff>=0.6.0
 
-# Dashboard (phase 5, non couvert par ce paquet)
+# Dashboard (dashboard/app.py, phase 5)
 streamlit>=1.38.0
 plotly>=5.24.0
+pandas>=2.2.0

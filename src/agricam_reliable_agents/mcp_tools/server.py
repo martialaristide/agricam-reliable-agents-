@@ -21,9 +21,11 @@ Décisions de conception
 - Le résultat est renvoyé à la fois en texte JSON (`content`) et en
   `structured_content` : les clients récents exploitent le second, les
   anciens le premier.
-- Le serveur stdio est construit avec un store en mémoire pré-rempli
-  (`seed_demo_data`) : c'est un serveur de démonstration. Pour une base
-  réelle, injecter un autre store via `build_server(AgriCamTools(store))`.
+- Le serveur stdio choisit son store d'après l'environnement
+  (`tools_from_env`) : `AGRICAM_DATABASE_URL` définie → store persistant
+  SQLAlchemy (SQLite/PostgreSQL), semé une seule fois s'il est vide ;
+  absente → store en mémoire pré-rempli (`default_tools`). Pour tout autre
+  cas, injecter directement `build_server(AgriCamTools(store))`.
 
 Lancement :
     PYTHONPATH=src python -m agricam_reliable_agents.mcp_tools.server
@@ -32,6 +34,8 @@ Lancement :
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Mapping
 from typing import Any
 
 import anyio
@@ -45,7 +49,9 @@ from agricam_reliable_agents.mcp_tools.data_store import (
     AgriCamDataError,
     AgriCamDataStore,
 )
+from agricam_reliable_agents.mcp_tools.sql_store import SqlAlchemyDataStore
 from agricam_reliable_agents.mcp_tools.tools import ALL_TOOL_SCHEMAS, AgriCamTools
+from agricam_reliable_agents.persistence.engine import DATABASE_URL_ENV_VAR
 
 SERVER_NAME = "agricam-reliable-agents"
 
@@ -106,9 +112,20 @@ def default_tools() -> AgriCamTools:
     return AgriCamTools(store)
 
 
+def tools_from_env(environ: Mapping[str, str] | None = None) -> AgriCamTools:
+    """Store persistant si `AGRICAM_DATABASE_URL` est définie, mémoire sinon."""
+    env = os.environ if environ is None else environ
+    url = env.get(DATABASE_URL_ENV_VAR)
+    if not url:
+        return default_tools()
+    store = SqlAlchemyDataStore.from_url(url)
+    store.seed_demo_data()  # sans effet si la base contient déjà des données
+    return AgriCamTools(store)
+
+
 async def serve_stdio(tools: AgriCamTools | None = None) -> None:
     """Démarre le serveur sur stdin/stdout et bloque jusqu'à fermeture du flux."""
-    server = build_server(tools or default_tools())
+    server = build_server(tools or tools_from_env())
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())
 

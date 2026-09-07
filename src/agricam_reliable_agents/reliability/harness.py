@@ -15,7 +15,7 @@ source autonome et valorisable indépendamment d'AgriCam.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -62,6 +62,13 @@ class TrialObserver(Protocol):
     def __call__(self, result: AgentResult, verification: VerificationResult) -> None: ...
 
 
+# Hook optionnel appelé AVANT l'instantané « avant » de chaque essai : c'est
+# l'endroit où remettre le système dans un état connu (ex. réinitialiser le
+# data store), pour garantir l'indépendance des essais sans que la fonction
+# d'instantané ait à deviner si elle est appelée avant ou après l'agent.
+BeforeTrialHook = Callable[[Task, int], None]
+
+
 @dataclass(frozen=True, slots=True)
 class HarnessConfig:
     """Paramètres d'exécution d'une campagne d'évaluation."""
@@ -82,18 +89,22 @@ def evaluate_task(
     state_snapshot_fn: StateSnapshotFn,
     config: HarnessConfig | None = None,
     on_trial: TrialObserver | None = None,
+    before_trial: BeforeTrialHook | None = None,
 ) -> ReliabilityReport:
     """
     Exécute une tâche `config.n_trials` fois et calcule son rapport de
     fiabilité (p̂, intervalle de Wilson, pass^k pour chaque k demandé).
 
-    Chaque essai est indépendant : un instantané de l'état est pris juste
-    avant et juste après l'exécution de l'agent, puis comparé par le
+    Chaque essai est indépendant : `before_trial` (s'il est fourni) remet
+    le système dans un état connu, puis un instantané de l'état est pris
+    juste avant et juste après l'exécution de l'agent, et comparé par le
     Success Verifier — jamais sur la seule base de ce que l'agent déclare.
     """
     config = config or _default_config()
     successes = 0
     for trial_id in range(config.n_trials):
+        if before_trial is not None:
+            before_trial(task, trial_id)
         state_before = state_snapshot_fn(task)
         result = agent_runner(task, trial_id)
         state_after = state_snapshot_fn(task)
@@ -125,10 +136,11 @@ def evaluate_reliability(
     state_snapshot_fn: StateSnapshotFn,
     config: HarnessConfig | None = None,
     on_trial: TrialObserver | None = None,
+    before_trial: BeforeTrialHook | None = None,
 ) -> list[ReliabilityReport]:
     """Exécute `evaluate_task` pour chaque tâche de `tasks` et agrège les rapports."""
     config = config or _default_config()
     return [
-        evaluate_task(task, agent_runner, state_snapshot_fn, config, on_trial)
+        evaluate_task(task, agent_runner, state_snapshot_fn, config, on_trial, before_trial)
         for task in tasks
     ]

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agricam_reliable_agents.mcp_tools.data_store import AgriCamDataStore
+from agricam_reliable_agents.mcp_tools.data_store import DataStore
 
 # ---------------------------------------------------------------------------
 # Schémas JSON (déclarés au serveur MCP)
@@ -99,10 +99,16 @@ ALL_TOOL_SCHEMAS: tuple[dict[str, Any], ...] = (
 # ---------------------------------------------------------------------------
 
 class AgriCamTools:
-    """Regroupe les outils MCP, liés à une instance de data store."""
+    """Regroupe les outils MCP, liés à une instance de data store (mémoire
+    ou persistant : tout objet respectant le contrat `DataStore`)."""
 
-    def __init__(self, store: AgriCamDataStore) -> None:
+    def __init__(self, store: DataStore) -> None:
         self._store = store
+
+    @property
+    def store(self) -> DataStore:
+        """Store sous-jacent (pour les instantanés du Success Verifier)."""
+        return self._store
 
     def get_sensor_data(self, parcel_id: str, metric: str = "all") -> dict[str, Any]:
         readings = self._store.get_sensor_data(parcel_id, metric)  # type: ignore[arg-type]
