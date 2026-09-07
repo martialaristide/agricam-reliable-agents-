@@ -29,6 +29,35 @@ Schéma
 Les champs structurés (appels d'outils, deltas d'état, pass^k) sont
 stockés en JSON : portable entre SQLite et PostgreSQL, et suffisant pour
 un dépôt d'audit où l'on relit un essai entier plutôt que d'y filtrer.
+
+Fondations SQL (corrigées)
+---------------------------
+- `trials` porte une contrainte d'unicité sur
+  `(campaign_id, task_id, trial_id)` (`uq_trials_identity`) : un essai est
+  identifié sans ambiguïté par ce triplet, et un second enregistrement du
+  même essai (rejeu accidentel d'un observateur, double appel) doit lever
+  une erreur plutôt que produire un doublon silencieux comptabilisé deux
+  fois dans les rapports.
+- Il n'existe **pas** de table `verifications` séparée : le résultat du
+  Success Verifier (`matches_expected`, `overconfidence_detected`,
+  `actual_state_delta`) est stocké directement sur la ligne `trials`
+  correspondante, dans la même transaction (`record_trial`). C'est une
+  garantie d'intégrité plus forte qu'une clé étrangère `verifications ->
+  trials` : il ne peut structurellement pas exister de verdict de
+  vérification sans essai valide, puisque les deux sont la même ligne.
+  `ForeignKey("campaigns.id")` protège le niveau au-dessus (un essai ne
+  peut référencer une campagne inexistante) — appliqué pour de vrai grâce
+  à `PRAGMA foreign_keys=ON` sur SQLite (`persistence/engine.py`), sans
+  quoi cette contrainte était jusqu'ici purement décorative.
+- `cost_usd` est stocké en `Numeric(12, 6)` (`Decimal` côté Python), pas
+  en `Float` : un `Decimal` construit depuis une chaîne (`Decimal(str(x))`)
+  n'accumule pas l'erreur de représentation binaire qu'un `sum()` de
+  `float` IEEE 754 introduit sur des valeurs comme 0,1 (`sum([0.1] * 10)
+  == 0.9999999999999999`, jamais exactement `1.0`). `sum_cost_usd` fait
+  cette somme en `Decimal`, exacte ; `TrialRecord.cost_usd` reste un
+  `float` (contrat public inchangé pour le dashboard et l'API) — la
+  dérive qu'on élimine est celle de l'AGRÉGATION répétée, pas de la
+  valeur individuelle affichée.
 """
 
 from __future__ import annotations
@@ -36,9 +65,20 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, Engine, ForeignKey, String, Text, select
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    Engine,
+    ForeignKey,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    select,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from agricam_reliable_agents.models.data_models import (
@@ -85,6 +125,9 @@ class TaskRow(CampaignBase):
 
 class TrialRow(CampaignBase):
     __tablename__ = "trials"
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "task_id", "trial_id", name="uq_trials_identity"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     campaign_id: Mapped[int] = mapped_column(ForeignKey("campaigns.id"), index=True)
@@ -94,7 +137,7 @@ class TrialRow(CampaignBase):
     tool_calls: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
     declared_success: Mapped[bool]
     latency_ms: Mapped[float]
-    cost_usd: Mapped[float]
+    cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6))
     max_steps_exceeded: Mapped[bool]
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     actual_state_delta: Mapped[dict[str, Any]] = mapped_column(JSON)
@@ -212,6 +255,18 @@ def _as_utc(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 
+def _to_decimal_cost(value: float) -> Decimal:
+    """Convertit un coût `float` en `Decimal` pour stockage `Numeric(12, 6)`.
+
+    Passe par `str()` (jamais `Decimal(value)` directement) : construire un
+    `Decimal` depuis un `float` reproduit fidèlement son imprécision binaire
+    (`Decimal(0.1)` vaut `0.1000000000000000055511151231257827021181583404541015625`),
+    exactement ce qu'on cherche à éviter. `round(..., 6)` avant conversion
+    aligne la valeur sur l'échelle de la colonne.
+    """
+    return Decimal(str(round(value, 6)))
+
+
 class ReliabilityRepository:
     """Écriture et relecture des campagnes de fiabilité."""
 
@@ -267,7 +322,7 @@ class ReliabilityRepository:
                 complexity=task.complexity.value if task else None,
                 expected_state_delta=dict(task.expected_state_delta) if task else None,
                 declared_success=result.declared_success, latency_ms=result.latency_ms,
-                cost_usd=result.cost_usd, max_steps_exceeded=result.max_steps_exceeded,
+                cost_usd=_to_decimal_cost(result.cost_usd), max_steps_exceeded=result.max_steps_exceeded,
                 error=result.error, actual_state_delta=dict(verification.actual_state_delta),
                 matches_expected=verification.matches_expected,
                 overconfidence_detected=verification.overconfidence_detected,
@@ -353,6 +408,20 @@ class ReliabilityRepository:
             for r in rows
         ]
 
+    def sum_cost_usd(self, campaign_id: int, task_id: str | None = None) -> Decimal:
+        """Coût total, sans dérive : somme les `Decimal` bruts de la colonne
+        `Numeric(12, 6)` en Python plutôt que de sommer des `float` relus
+        (`sum(t.cost_usd for t in trials)` peut dériver, cf. docstring de
+        module) ou de déléguer la somme au SQL (SQLite calcule `SUM()` sur
+        une colonne `NUMERIC` en flottant IEEE 754, ce qui réintroduirait
+        exactement la dérive qu'on élimine)."""
+        stmt = select(TrialRow.cost_usd).where(TrialRow.campaign_id == campaign_id)
+        if task_id is not None:
+            stmt = stmt.where(TrialRow.task_id == task_id)
+        with self._session() as session:
+            values = session.scalars(stmt).all()
+        return sum(values, Decimal(0))
+
     def list_trials(self, campaign_id: int, task_id: str | None = None) -> list[TrialRecord]:
         stmt = select(TrialRow).where(TrialRow.campaign_id == campaign_id)
         if task_id is not None:
@@ -384,7 +453,7 @@ class ReliabilityRepository:
                 for c in r.tool_calls
             ),
             declared_success=r.declared_success, latency_ms=r.latency_ms,
-            cost_usd=r.cost_usd, max_steps_exceeded=r.max_steps_exceeded, error=r.error,
+            cost_usd=float(r.cost_usd), max_steps_exceeded=r.max_steps_exceeded, error=r.error,
             actual_state_delta=dict(r.actual_state_delta),
             matches_expected=r.matches_expected,
             overconfidence_detected=r.overconfidence_detected,
