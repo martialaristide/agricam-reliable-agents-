@@ -30,6 +30,15 @@ avec son statut : `ok` (exécuté), `refused` (bloqué par la politique de
 sécurité) ou `error` (rejeté par l'outil : entité inconnue, arguments
 invalides). Le Success Verifier ne se sert pas de cette liste : elle
 existe pour comprendre un essai, pas pour le juger.
+
+Détection de la déclaration de succès
+--------------------------------------
+`extract_success_claim` (motifs français/anglais) est le comportement par
+défaut, câblé pour l'agent AgriCam. `SuccessClaimExtractor` (Protocol) et
+son injection dans `run_agent(success_claim_extractor=...)` permettent à un
+agent tiers (Connecteur d'Agent Générique, `connector/`) de fournir sa
+propre logique — chaque agent formule un succès différemment, et le
+réutiliser tel quel produirait de faux taux de sur-confiance.
 """
 
 from __future__ import annotations
@@ -37,7 +46,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from typing import Any
+from typing import Any, Protocol
 
 from agricam_reliable_agents.agent.llm_client import (
     LLMClient,
@@ -122,6 +131,37 @@ def extract_success_claim(final_text: str) -> bool:
     return bool(_SUCCESS_CLAIM_PATTERN.search(text))
 
 
+class SuccessClaimExtractor(Protocol):
+    """
+    Contrat pour décider si la réponse finale de l'agent PRÉTEND avoir
+    réussi. Extrait de la boucle pour que chaque connexion d'agent tierce
+    (Connecteur d'Agent Générique, `connector/`) puisse fournir la sienne :
+    un agent tiers formule un succès autrement qu'AgriCam (ex. répond
+    toujours « OK »), et le classifieur par motifs câblé en dur produirait
+    de faux taux de sur-confiance en étant appliqué tel quel à ses réponses.
+
+    Important : comme `extract_success_claim`, une implémentation ne doit
+    JAMAIS regarder l'état réel du système — seulement le texte de l'agent.
+    """
+
+    def __call__(self, final_text: str) -> bool: ...
+
+
+class PatternSuccessClaimExtractor:
+    """
+    Implémentation par défaut : délègue à `extract_success_claim` (motifs
+    français/anglais câblés, cf. sa docstring). C'est l'extracteur utilisé
+    par `run_agent` si aucun n'est injecté — zéro régression sur l'agent
+    AgriCam existant, qui n'a jamais eu besoin d'en fournir un autre.
+    """
+
+    def __call__(self, final_text: str) -> bool:
+        return extract_success_claim(final_text)
+
+
+DEFAULT_SUCCESS_CLAIM_EXTRACTOR: SuccessClaimExtractor = PatternSuccessClaimExtractor()
+
+
 def _estimate_cost_usd(input_tokens: int, output_tokens: int, pricing: tuple[float, float]) -> float:
     return input_tokens / 1_000_000 * pricing[0] + output_tokens / 1_000_000 * pricing[1]
 
@@ -173,6 +213,7 @@ def run_agent(
     confirmation_provider: ConfirmationProvider | None = None,
     incident_sink: IncidentSink | None = None,
     pricing: tuple[float, float] | None = None,
+    success_claim_extractor: SuccessClaimExtractor = DEFAULT_SUCCESS_CLAIM_EXTRACTOR,
 ) -> AgentResult:
     """
     Exécute l'agent sur une tâche, jusqu'à réponse finale ou `max_steps`.
@@ -191,6 +232,11 @@ def run_agent(
     `pricing` (USD par million de jetons en entrée et en sortie) sert à
     l'estimation de coût ; par défaut le tarif de Claude Opus 5, ou celui
     du modèle exposé par `llm_client.model` s'il est connu.
+
+    `success_claim_extractor` décide si la réponse finale de l'agent
+    prétend avoir réussi ; par défaut `PatternSuccessClaimExtractor`
+    (motifs AgriCam existants). Un agent tiers connecté via le Connecteur
+    d'Agent Générique peut fournir le sien.
     """
     start = time.monotonic()
     messages: list[dict[str, Any]] = [{"role": "user", "content": task.prompt}]
@@ -274,7 +320,7 @@ def run_agent(
         # Réponse finale
         final_text = response.final_text or ""
         return build_result(
-            final_text, declared=extract_success_claim(final_text), exceeded=False, error=None
+            final_text, declared=success_claim_extractor(final_text), exceeded=False, error=None
         )
 
     return build_result("MAX_STEPS_EXCEEDED", declared=False, exceeded=True, error=None)
