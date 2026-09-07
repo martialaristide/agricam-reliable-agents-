@@ -135,8 +135,13 @@ class SqlAlchemyDataStore:
 
     # ---- Cycle de vie des données -----------------------------------------
     def is_empty(self) -> bool:
+        """Vrai si AUCUNE table métier ne contient de ligne (un seed partiel
+        laisserait sinon une clé primaire en doublon)."""
         with self._session() as session:
-            return session.scalar(select(func.count()).select_from(DiagnosticRow)) == 0
+            for table in (SensorReadingRow, DiagnosticRow, ProductRow, FarmerRow):
+                if session.scalar(select(func.count()).select_from(table)):
+                    return False
+        return True
 
     def reset(self) -> None:
         """Vide toutes les tables métier (ordre respectant les clés étrangères)."""
@@ -191,6 +196,8 @@ class SqlAlchemyDataStore:
         return self._to_diagnostic(row)
 
     def get_diagnostic_history(self, parcel_id: str | None = None, limit: int = 20) -> list[Diagnostic]:
+        if limit <= 0:
+            return []
         stmt = select(DiagnosticRow)
         if parcel_id is not None:
             stmt = stmt.where(DiagnosticRow.parcel_id == parcel_id)
@@ -221,6 +228,8 @@ class SqlAlchemyDataStore:
             row.status = "treated"
 
     def decrement_stock(self, product_id: str, quantity: int = 1) -> None:
+        if quantity <= 0:
+            raise ValueError("quantity doit être strictement positif.")
         with self._session() as session, session.begin():
             result = session.execute(
                 update(ProductRow)

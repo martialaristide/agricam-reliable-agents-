@@ -17,9 +17,14 @@ Schéma
 - `campaigns` : une exécution du harnais (nom, modèle, date).
 - `tasks` : définition des tâches évaluées (upsert par identifiant, pour
   que le dashboard puisse croiser fiabilité et complexité).
-- `trials` : un essai = résultat brut de l'agent + verdict du vérificateur.
+- `trials` : un essai = résultat brut de l'agent + verdict du vérificateur,
+  avec une copie de la définition de tâche utilisée pour le juger
+  (`complexity`, `expected_state_delta`) : la table `tasks` est un
+  upsert global, un audit doit pouvoir relire l'attendu d'époque.
 - `reports` : rapport agrégé par tâche et par campagne.
-- `security_incidents` : incidents journalisés par la garde de sécurité.
+- `security_incidents` : incidents journalisés par la garde de sécurité,
+  rattachés à la tâche (`task_id`) car `trial_id` seul est partagé entre
+  les tâches d'une campagne.
 
 Les champs structurés (appels d'outils, deltas d'état, pass^k) sont
 stockés en JSON : portable entre SQLite et PostgreSQL, et suffisant pour
@@ -28,6 +33,7 @@ un dépôt d'audit où l'on relit un essai entier plutôt que d'y filtrer.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -95,6 +101,8 @@ class TrialRow(CampaignBase):
     matches_expected: Mapped[bool]
     overconfidence_detected: Mapped[bool]
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    complexity: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    expected_state_delta: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
 
 class ReportRow(CampaignBase):
@@ -118,6 +126,7 @@ class SecurityIncidentRow(CampaignBase):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     campaign_id: Mapped[int] = mapped_column(ForeignKey("campaigns.id"), index=True)
     trial_id: Mapped[int]
+    task_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     attack_category: Mapped[str] = mapped_column(String(32))
     payload: Mapped[str] = mapped_column(Text)
     blocked: Mapped[bool]
@@ -138,6 +147,18 @@ class CampaignRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolCallRecord:
+    """Un appel d'outil relu depuis la base (nom, arguments, horodatage ISO,
+    statut `ok`/`refused`/`error` et message d'erreur éventuel)."""
+
+    tool_name: str
+    arguments: dict[str, Any]
+    timestamp: str
+    status: str = "ok"
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class TrialRecord:
     """Un essai relu depuis la base : résultat de l'agent + verdict du vérificateur."""
 
@@ -145,7 +166,7 @@ class TrialRecord:
     task_id: str
     trial_id: int
     final_answer: str
-    tool_call_names: tuple[str, ...]
+    tool_calls: tuple[ToolCallRecord, ...]
     declared_success: bool
     latency_ms: float
     cost_usd: float
@@ -155,6 +176,16 @@ class TrialRecord:
     matches_expected: bool
     overconfidence_detected: bool
     recorded_at: datetime
+    complexity: str | None = None
+    expected_state_delta: dict[str, Any] | None = None
+
+    @property
+    def tool_call_names(self) -> tuple[str, ...]:
+        return tuple(c.tool_name for c in self.tool_calls)
+
+    @property
+    def successful_tool_call_names(self) -> tuple[str, ...]:
+        return tuple(c.tool_name for c in self.tool_calls if c.status == "ok")
 
     @property
     def verified_success(self) -> bool:
@@ -170,6 +201,7 @@ class IncidentRecord:
     payload: str
     blocked: bool
     detected_at: datetime
+    task_id: str | None = None
 
 
 def _utcnow() -> datetime:
@@ -215,18 +247,25 @@ class ReliabilityRepository:
                 verification_query=task.verification_query,
             ))
 
-    def record_trial(self, campaign_id: int, result: AgentResult, verification: VerificationResult) -> int:
+    def record_trial(self, campaign_id: int, result: AgentResult, verification: VerificationResult,
+                     task: Task | None = None) -> int:
+        """Archive un essai ; `task` (si fourni) fige la définition avec
+        laquelle il a été jugé."""
         if result.task_id != verification.task_id or result.trial_id != verification.trial_id:
             raise ValueError("AgentResult et VerificationResult ne décrivent pas le même essai.")
+        if task is not None and task.id != result.task_id:
+            raise ValueError("La tâche fournie ne correspond pas à l'essai.")
         with self._session() as session, session.begin():
             row = TrialRow(
                 campaign_id=campaign_id, task_id=result.task_id, trial_id=result.trial_id,
                 final_answer=result.final_answer,
                 tool_calls=[
                     {"tool_name": c.tool_name, "arguments": dict(c.arguments),
-                     "timestamp": c.timestamp.isoformat()}
+                     "timestamp": c.timestamp.isoformat(), "status": c.status, "error": c.error}
                     for c in result.tool_calls
                 ],
+                complexity=task.complexity.value if task else None,
+                expected_state_delta=dict(task.expected_state_delta) if task else None,
                 declared_success=result.declared_success, latency_ms=result.latency_ms,
                 cost_usd=result.cost_usd, max_steps_exceeded=result.max_steps_exceeded,
                 error=result.error, actual_state_delta=dict(verification.actual_state_delta),
@@ -254,7 +293,7 @@ class ReliabilityRepository:
     def record_incident(self, campaign_id: int, incident: SecurityIncident) -> int:
         with self._session() as session, session.begin():
             row = SecurityIncidentRow(
-                campaign_id=campaign_id, trial_id=incident.trial_id,
+                campaign_id=campaign_id, trial_id=incident.trial_id, task_id=incident.task_id,
                 attack_category=incident.attack_category.value, payload=incident.payload,
                 blocked=incident.blocked, detected_at=incident.detected_at,
             )
@@ -263,11 +302,13 @@ class ReliabilityRepository:
             return row.id
 
     # ---- Adaptateurs vers les callbacks du harnais et de la garde ---------
-    def trial_observer(self, campaign_id: int) -> TrialObserver:
-        """Callback à passer en `on_trial=` à `evaluate_task`/`evaluate_reliability`."""
+    def trial_observer(self, campaign_id: int, tasks: Iterable[Task] = ()) -> TrialObserver:
+        """Callback à passer en `on_trial=` à `evaluate_task`/`evaluate_reliability`.
+        `tasks` permet de figer la définition de chaque tâche dans l'essai archivé."""
+        by_id = {task.id: task for task in tasks}
 
         def observe(result: AgentResult, verification: VerificationResult) -> None:
-            self.record_trial(campaign_id, result, verification)
+            self.record_trial(campaign_id, result, verification, task=by_id.get(result.task_id))
 
         return observe
 
@@ -302,8 +343,15 @@ class ReliabilityRepository:
 
     def list_tasks(self) -> list[Task]:
         with self._session() as session:
-            ids = session.scalars(select(TaskRow.id).order_by(TaskRow.id)).all()
-        return [t for t in (self.get_task(i) for i in ids) if t is not None]
+            rows = session.scalars(select(TaskRow).order_by(TaskRow.id)).all()
+        return [
+            Task(
+                id=r.id, prompt=r.prompt, complexity=TaskComplexity(r.complexity),
+                category=r.category, expected_state_delta=dict(r.expected_state_delta),
+                verification_query=r.verification_query,
+            )
+            for r in rows
+        ]
 
     def list_trials(self, campaign_id: int, task_id: str | None = None) -> list[TrialRecord]:
         stmt = select(TrialRow).where(TrialRow.campaign_id == campaign_id)
@@ -311,20 +359,39 @@ class ReliabilityRepository:
             stmt = stmt.where(TrialRow.task_id == task_id)
         with self._session() as session:
             rows = session.scalars(stmt.order_by(TrialRow.id)).all()
-        return [
-            TrialRecord(
-                campaign_id=r.campaign_id, task_id=r.task_id, trial_id=r.trial_id,
-                final_answer=r.final_answer,
-                tool_call_names=tuple(c["tool_name"] for c in r.tool_calls),
-                declared_success=r.declared_success, latency_ms=r.latency_ms,
-                cost_usd=r.cost_usd, max_steps_exceeded=r.max_steps_exceeded, error=r.error,
-                actual_state_delta=dict(r.actual_state_delta),
-                matches_expected=r.matches_expected,
-                overconfidence_detected=r.overconfidence_detected,
-                recorded_at=_as_utc(r.recorded_at),
-            )
-            for r in rows
-        ]
+        return [self._to_trial(r) for r in rows]
+
+    def get_trial(self, campaign_id: int, task_id: str, trial_id: int) -> TrialRecord | None:
+        """L'essai `trial_id` de la tâche `task_id` dans la campagne, ou None."""
+        with self._session() as session:
+            row = session.scalars(
+                select(TrialRow).where(
+                    TrialRow.campaign_id == campaign_id, TrialRow.task_id == task_id,
+                    TrialRow.trial_id == trial_id,
+                ).order_by(TrialRow.id.desc())
+            ).first()
+        return None if row is None else self._to_trial(row)
+
+    @staticmethod
+    def _to_trial(r: TrialRow) -> TrialRecord:
+        return TrialRecord(
+            campaign_id=r.campaign_id, task_id=r.task_id, trial_id=r.trial_id,
+            final_answer=r.final_answer,
+            tool_calls=tuple(
+                ToolCallRecord(tool_name=c["tool_name"], arguments=dict(c.get("arguments", {})),
+                               timestamp=str(c.get("timestamp", "")),
+                               status=str(c.get("status", "ok")), error=c.get("error"))
+                for c in r.tool_calls
+            ),
+            declared_success=r.declared_success, latency_ms=r.latency_ms,
+            cost_usd=r.cost_usd, max_steps_exceeded=r.max_steps_exceeded, error=r.error,
+            actual_state_delta=dict(r.actual_state_delta),
+            matches_expected=r.matches_expected,
+            overconfidence_detected=r.overconfidence_detected,
+            recorded_at=_as_utc(r.recorded_at),
+            complexity=r.complexity,
+            expected_state_delta=dict(r.expected_state_delta) if r.expected_state_delta is not None else None,
+        )
 
     def list_reports(self, campaign_id: int) -> list[ReliabilityReport]:
         with self._session() as session:
@@ -351,7 +418,7 @@ class ReliabilityRepository:
             IncidentRecord(
                 campaign_id=r.campaign_id, trial_id=r.trial_id,
                 attack_category=AttackCategory(r.attack_category), payload=r.payload,
-                blocked=r.blocked, detected_at=_as_utc(r.detected_at),
+                blocked=r.blocked, detected_at=_as_utc(r.detected_at), task_id=r.task_id,
             )
             for r in rows
         ]

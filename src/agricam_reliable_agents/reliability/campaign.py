@@ -44,7 +44,8 @@ def run_persisted_campaign(
     `before_trial(task, trial_id)` est appelé avant chaque essai (typiquement
     pour remettre le data store dans un état connu) — voir `evaluate_task`.
     """
-    observer = repository.trial_observer(campaign_id)
+    tasks = tuple(tasks)
+    observer = repository.trial_observer(campaign_id, tasks)
     reports: list[ReliabilityReport] = []
     for task in tasks:
         repository.record_task(task)

@@ -16,7 +16,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from agricam_reliable_agents.mcp_tools.data_store import DataStore
+from agricam_reliable_agents.mcp_tools.data_store import AgriCamDataError, DataStore
+
+NOTIFY_MESSAGE_MAX_LENGTH = 300
 
 # ---------------------------------------------------------------------------
 # Schémas JSON (déclarés au serveur MCP)
@@ -78,7 +80,7 @@ NOTIFY_FARMER_SCHEMA: dict[str, Any] = {
         "type": "object",
         "properties": {
             "farmer_id": {"type": "string"},
-            "message": {"type": "string", "maxLength": 300},
+            "message": {"type": "string", "maxLength": NOTIFY_MESSAGE_MAX_LENGTH},
         },
         "required": ["farmer_id", "message"],
     },
@@ -134,6 +136,10 @@ class AgriCamTools:
 
     def recommend_treatment(self, diagnostic_id: str) -> dict[str, Any]:
         diagnostic = self._store.get_diagnostic(diagnostic_id)
+        if diagnostic.status == "treated":
+            # Un second appel « pour vérifier » ne doit pas consommer une
+            # seconde dose : l'erreur est explicite et l'état reste intact.
+            raise AgriCamDataError(f"Diagnostic déjà traité : {diagnostic_id!r}.")
         if diagnostic.recommended_product_id is not None:
             self._store.decrement_stock(diagnostic.recommended_product_id, quantity=1)
         self._store.mark_diagnostic_treated(diagnostic_id)
@@ -148,6 +154,12 @@ class AgriCamTools:
         return {"product_id": product_id, "name": product.name, "stock_qty": product.stock_qty}
 
     def notify_farmer(self, farmer_id: str, message: str) -> dict[str, Any]:
+        if not isinstance(message, str) or not message.strip():
+            raise AgriCamDataError("Le message de notification est vide.")
+        if len(message) > NOTIFY_MESSAGE_MAX_LENGTH:
+            raise AgriCamDataError(
+                f"Message trop long ({len(message)} caractères, maximum {NOTIFY_MESSAGE_MAX_LENGTH})."
+            )
         self._store.notify_farmer(farmer_id, message)
         return {"farmer_id": farmer_id, "notified": True}
 

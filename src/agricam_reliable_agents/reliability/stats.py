@@ -55,6 +55,13 @@ def wilson_score_interval(
 
     low = max(0.0, center - margin)
     high = min(1.0, center + margin)
+    # Aux extrêmes, les bornes de Wilson valent exactement 0 (aucun succès)
+    # ou 1 (que des succès) ; l'arithmétique flottante laisse sinon un
+    # résidu (~1e-17) qui fausse les images par x ↦ x^k.
+    if successes == 0:
+        low = 0.0
+    if successes == n_trials:
+        high = 1.0
     return (low, high)
 
 
@@ -86,3 +93,17 @@ def pass_k(p_hat: float, k: int) -> float:
     if k < 1:
         raise ValueError("k doit être un entier supérieur ou égal à 1.")
     return p_hat ** k
+
+
+def pass_k_interval(wilson_ci: tuple[float, float], k: int) -> tuple[float, float]:
+    """
+    Intervalle de confiance de pass^k déduit de l'intervalle de Wilson
+    sur p̂ : comme x ↦ x^k est croissante sur [0, 1], l'image de
+    l'intervalle [low, high] est [low^k, high^k], au même niveau de
+    confiance. Sans cela, p̂^k affiché seul pour k = 10 et n = 30 donne une
+    fausse impression de précision.
+    """
+    low, high = wilson_ci
+    if not (0.0 <= low <= high <= 1.0):
+        raise ValueError("wilson_ci doit être un couple (low, high) dans [0, 1] avec low <= high.")
+    return (pass_k(low, k), pass_k(high, k))

@@ -32,7 +32,7 @@ from typing import Any, Protocol
 # Modèle par défaut : le plus capable de la gamme Opus au moment de la
 # rédaction. Surchargeable via le paramètre `model` du constructeur.
 DEFAULT_MODEL = "claude-opus-5"
-DEFAULT_MAX_TOKENS = 4096
+DEFAULT_MAX_TOKENS = 16000
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_BASE_DELAY_SECONDS = 1.0
 
@@ -61,15 +61,31 @@ class LLMResponse:
     """
     Réponse normalisée du modèle, indépendante du fournisseur.
 
-    Si `tool_call` est renseigné, le modèle demande un outil ; `final_text`
-    contient alors l'éventuel texte d'accompagnement (ex. « Je vérifie le
-    stock. »). Si `tool_call` est None, `final_text` est la conclusion.
+    Si `tool_call` est renseigné, le modèle demande au moins un outil ;
+    `extra_tool_calls` porte les appels supplémentaires du même tour
+    (appel d'outils parallèle) et `tool_calls` les rassemble dans l'ordre.
+    `final_text` contient alors l'éventuel texte d'accompagnement. Si
+    aucun outil n'est demandé, `final_text` est la conclusion.
+
+    `raw_content` est le contenu brut de la réponse tel que renvoyé par le
+    fournisseur (blocs `thinking`, `text`, `tool_use`…) : la boucle agent
+    le rejoue tel quel comme tour assistant. `stop_reason` permet de
+    distinguer une conclusion (`end_turn`) d'une troncature (`max_tokens`).
     """
 
     tool_call: LLMToolCallRequest | None
     final_text: str | None
     input_tokens: int = 0
     output_tokens: int = 0
+    extra_tool_calls: tuple[LLMToolCallRequest, ...] = ()
+    raw_content: Any = None
+    stop_reason: str | None = None
+
+    @property
+    def tool_calls(self) -> tuple[LLMToolCallRequest, ...]:
+        if self.tool_call is None:
+            return ()
+        return (self.tool_call, *self.extra_tool_calls)
 
 
 class LLMClient(Protocol):
@@ -110,18 +126,24 @@ class AnthropicLLMClient:
       observé imprévisible. Une seule boucle de retry fait autorité.
     - `client` et `sleep` sont injectables pour rendre le comportement
       testable sans réseau ni attente réelle.
-    - Un bloc `tool_use` a priorité sur le texte : la boucle agent exécute
-      l'outil, et le texte d'accompagnement est conservé pour l'audit.
-    - Les blocs `thinking` sont ignorés (leur contenu n'est pas destiné à
-      la boucle) ; un `stop_reason == "refusal"` sans texte est traduit en
-      marqueur explicite pour que le Success Verifier voie un échec net.
+    - Tous les blocs `tool_use` d'une réponse sont normalisés (appel
+      d'outils parallèle, actif par défaut) ; le texte d'accompagnement
+      est conservé pour l'audit.
+    - Le contenu brut de la réponse (`raw_content`) est transmis à la
+      boucle agent, qui le rejoue tel quel : les blocs `thinking` du
+      raisonnement adaptatif (actif par défaut sur Opus 5) et leur
+      signature restent intacts, comme l'exige l'API.
+    - Un `stop_reason == "refusal"` sans texte est traduit en marqueur
+      explicite pour que le Success Verifier voie un échec net ; un
+      `max_tokens` est signalé à la boucle, qui archive l'essai comme
+      non concluant plutôt que comme un échec de l'agent.
+    - Les jetons servis ou écrits en cache sont comptés comme jetons
+      d'entrée (approximation prudente pour l'estimation de coût).
 
     Limites connues
     ---------------
-    - Le coût estimé dans agent/loop.py utilise des tarifs indicatifs ;
-      il ne lit pas la tarification réelle du modèle configuré.
-    - Le streaming n'est pas utilisé : `max_tokens` doit rester modéré
-      (≤ 16 000) pour éviter les timeouts HTTP du SDK.
+    - Le streaming n'est pas utilisé : `max_tokens` reste à 16 000 par
+      défaut pour éviter les timeouts HTTP du SDK.
     """
 
     def __init__(
@@ -207,20 +229,30 @@ class AnthropicLLMClient:
     @staticmethod
     def _normalize(response: Any) -> LLMResponse:
         text_parts: list[str] = []
-        tool_call: LLMToolCallRequest | None = None
+        tool_calls: list[LLMToolCallRequest] = []
         for block in response.content:
-            if block.type == "tool_use" and tool_call is None:
-                tool_call = LLMToolCallRequest(id=block.id, name=block.name, arguments=dict(block.input))
+            if block.type == "tool_use":
+                tool_calls.append(LLMToolCallRequest(id=block.id, name=block.name, arguments=dict(block.input)))
             elif block.type == "text":
                 text_parts.append(block.text)
 
+        stop_reason = getattr(response, "stop_reason", None)
         final_text: str | None = "\n".join(text_parts) if text_parts else None
-        if tool_call is None and final_text is None:
-            final_text = _REFUSAL_MARKER if getattr(response, "stop_reason", None) == "refusal" else ""
+        if not tool_calls and final_text is None:
+            final_text = _REFUSAL_MARKER if stop_reason == "refusal" else ""
 
+        usage = response.usage
+        input_tokens = (
+            usage.input_tokens
+            + (getattr(usage, "cache_creation_input_tokens", 0) or 0)
+            + (getattr(usage, "cache_read_input_tokens", 0) or 0)
+        )
         return LLMResponse(
-            tool_call=tool_call,
+            tool_call=tool_calls[0] if tool_calls else None,
             final_text=final_text,
-            input_tokens=response.usage.input_tokens,
-            output_tokens=response.usage.output_tokens,
+            input_tokens=input_tokens,
+            output_tokens=usage.output_tokens,
+            extra_tool_calls=tuple(tool_calls[1:]),
+            raw_content=list(response.content),
+            stop_reason=stop_reason,
         )

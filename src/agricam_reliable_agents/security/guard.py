@@ -7,6 +7,7 @@ ne puisse accidentellement contourner la politique de sécurité.
 
 from __future__ import annotations
 
+import json
 from typing import Protocol
 
 from agricam_reliable_agents.models.data_models import (
@@ -44,6 +45,7 @@ def guard_before_action(
     trial_id: int,
     confirmation_provider: ConfirmationProvider = _deny_all_confirmation,
     incident_sink: IncidentSink | None = None,
+    task_id: str | None = None,
 ) -> bool:
     """
     Décide si un appel d'outil peut être exécuté.
@@ -63,6 +65,8 @@ def guard_before_action(
             production, simulée en test). Par défaut, refuse tout —
             principe de sécurité "fail-safe".
         incident_sink: callback optionnel de journalisation des incidents.
+        task_id: tâche en cours, pour rattacher l'incident à un essai précis
+            (`trial_id` seul est partagé entre les tâches d'une campagne).
 
     Returns:
         True si l'action peut être exécutée, False sinon.
@@ -76,8 +80,12 @@ def guard_before_action(
                 SecurityIncident(
                     trial_id=trial_id,
                     attack_category=AttackCategory.EXCESSIVE_AGENCY,
-                    payload=str(call.arguments),
+                    payload=json.dumps(
+                        {"tool_name": call.tool_name, "arguments": call.arguments},
+                        ensure_ascii=False, default=str, sort_keys=True,
+                    ),
                     blocked=True,
+                    task_id=task_id,
                 )
             )
         return False

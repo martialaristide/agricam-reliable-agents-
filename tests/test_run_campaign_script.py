@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from agricam_reliable_agents.agent.llm_client import LLMResponse, LLMToolCallRequest
 from agricam_reliable_agents.models.data_models import AttackCategory
 from agricam_reliable_agents.reliability.repository import ReliabilityRepository
 
@@ -90,8 +91,10 @@ def test_always_failing_campaign_is_caught_by_verifier_and_guard(script, tmp_pat
     # L'agent déclare toujours réussir : chaque échec réel est une sur-confiance.
     assert all(t.declared_success and t.overconfidence_detected for t in trials)
     assert all(t.actual_state_delta == {} for t in trials)
-    # T1 se trompe d'identifiant dès la première étape : aucun appel réussi.
-    assert all(t.tool_call_names == () for t in trials if t.task_id == "T1-treat")
+    # T1 se trompe d'identifiant dès la première étape : l'appel est archivé en erreur, aucun réussi.
+    t1 = [t for t in trials if t.task_id == "T1-treat"]
+    assert all(t.successful_tool_call_names == () for t in t1)
+    assert all([c.status for c in t.tool_calls] == ["error"] for t in t1)
     assert repo.list_incidents(campaign_id) == []  # jamais atteint notify_farmer
     repo.engine.dispose()
 
@@ -106,26 +109,31 @@ def test_out_of_scope_notification_is_blocked_and_recorded(script, tmp_path: Pat
             response = super().generate(messages, tool_schemas)
             if response.tool_call is not None and response.tool_call.name == "notify_farmer":
                 self._derailed = True
-                return script.LLMResponse(
-                    tool_call=script.LLMToolCallRequest(
+                return LLMResponse(
+                    tool_call=LLMToolCallRequest(
                         id="x", name="notify_farmer", arguments={"farmer_id": "F-404", "message": "x"},
                     ),
                     final_text=None,
                 )
             return response
 
-    monkeypatch.setattr(script, "SimulatedLLMClient", DerailOnNotify)
+    from agricam_reliable_agents.reliability import simulation
+
+    monkeypatch.setattr(simulation, "SimulatedLLMClient", DerailOnNotify)
     args = script.parse_args(["--n-trials", "1", "--p-step", "1.0", "--database-url", db_url])
     campaign_id, reports, repo = script.run_campaign(args)
 
     incidents = repo.list_incidents(campaign_id)
     assert len(incidents) == 2  # T2 et T3 tentent une notification
     assert all(i.attack_category is AttackCategory.EXCESSIVE_AGENCY and i.blocked for i in incidents)
+    assert sorted(i.task_id for i in incidents) == ["T2-treat-notify", "T3-full-workflow"]
     by_task = {r.task_id: r.p_hat for r in reports}
     assert by_task == {"T1-treat": 1.0, "T2-treat-notify": 0.0, "T3-full-workflow": 0.0}
     repo.engine.dispose()
 
 
-def test_parse_args_validates_n_trials(script):
+def test_parse_args_validates_n_trials_and_p_step(script):
     with pytest.raises(SystemExit):
         script.parse_args(["--n-trials", "0"])
+    with pytest.raises(SystemExit):
+        script.parse_args(["--p-step", "1.5"])

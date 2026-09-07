@@ -23,6 +23,13 @@ def test_guard_blocks_sensitive_tool_outside_scope():
     assert allowed is False
     assert len(incidents) == 1
     assert incidents[0].attack_category.value == "LLM08"
+    # La charge est du JSON (jamais une repr Python), et porte l'outil visé.
+    import json
+
+    assert json.loads(incidents[0].payload) == {
+        "tool_name": "notify_farmer", "arguments": {"farmer_id": "F-999", "message": "x"},
+    }
+    assert incidents[0].task_id is None
 
 
 def test_guard_requires_confirmation_for_sensitive_tool_in_scope():

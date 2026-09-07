@@ -72,11 +72,16 @@ def reports_frame(repository: ReliabilityRepository, campaign_id: int) -> pd.Dat
     complexity = _complexity_by_task(repository)
     trials = repository.list_trials(campaign_id)
     overconfident: dict[str, int] = {}
+    counted: dict[str, int] = {}
     for t in trials:
         overconfident[t.task_id] = overconfident.get(t.task_id, 0) + int(t.overconfidence_detected)
+        counted[t.task_id] = counted.get(t.task_id, 0) + 1
+        if t.complexity:
+            complexity.setdefault(t.task_id, t.complexity)
 
     rows = []
     for report in repository.list_reports(campaign_id):
+        n_observed = counted.get(report.task_id, 0) or report.n_trials
         row = {
             "task_id": report.task_id,
             "complexity": complexity.get(report.task_id, UNKNOWN_COMPLEXITY),
@@ -85,7 +90,9 @@ def reports_frame(repository: ReliabilityRepository, campaign_id: int) -> pd.Dat
             "p_hat": report.p_hat,
             "ci_low": report.wilson_ci[0],
             "ci_high": report.wilson_ci[1],
-            "overconfidence_rate": overconfident.get(report.task_id, 0) / report.n_trials,
+            # rapporté au nombre d'essais réellement archivés : reste dans [0, 1]
+            # même si une campagne a été rejouée sur le même identifiant
+            "overconfidence_rate": overconfident.get(report.task_id, 0) / n_observed,
         }
         for k, value in sorted(report.pass_k.items()):
             row[f"pass_{k}"] = value
@@ -141,6 +148,7 @@ def trials_frame(repository: ReliabilityRepository, campaign_id: int) -> pd.Data
 def incidents_frame(repository: ReliabilityRepository, campaign_id: int) -> pd.DataFrame:
     rows = [
         {
+            "task_id": i.task_id,
             "trial_id": i.trial_id,
             "attack_category": i.attack_category.value,
             "blocked": i.blocked,
@@ -149,7 +157,7 @@ def incidents_frame(repository: ReliabilityRepository, campaign_id: int) -> pd.D
         }
         for i in repository.list_incidents(campaign_id)
     ]
-    return pd.DataFrame(rows, columns=["trial_id", "attack_category", "blocked", "payload", "detected_at"])
+    return pd.DataFrame(rows, columns=["task_id", "trial_id", "attack_category", "blocked", "payload", "detected_at"])
 
 
 def comparison_frame(repository: ReliabilityRepository, campaign_ids: Sequence[int]) -> pd.DataFrame:

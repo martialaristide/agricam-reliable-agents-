@@ -129,6 +129,8 @@ def test_run_agent_blocks_sensitive_action_outside_scope():
     assert result.declared_success is True
     assert len(incidents) == 1
     assert incidents[0].blocked is True
+    assert incidents[0].task_id == "T-INT-1"
+    assert [c.status for c in result.tool_calls] == ["refused"]
 
 
 def test_run_agent_recovers_from_tool_error():
@@ -148,7 +150,10 @@ def test_run_agent_recovers_from_tool_error():
     # transmise à l'agent comme un résultat d'outil en échec.
     result = run_agent(make_task(), trial_id=0, llm_client=llm, tools=tools, policy=policy)
     assert result.declared_success is False
-    assert result.tool_calls == ()  # l'appel a échoué, donc non comptabilisé comme réussi
+    # L'appel est archivé pour l'audit, avec son statut d'échec : il n'a rien modifié.
+    assert [(c.tool_name, c.status) for c in result.tool_calls] == [("recommend_treatment", "error")]
+    assert "Diagnostic inconnu" in result.tool_calls[0].error
+    assert not any(c.succeeded for c in result.tool_calls)
 
 
 def test_run_agent_builds_anthropic_tool_use_and_tool_result_blocks():
@@ -243,5 +248,5 @@ def test_run_agent_executes_sensitive_action_when_confirmed():
                        confirmation_provider=confirm)
 
     assert confirmations == ["notify_farmer"]
-    assert [c.tool_name for c in result.tool_calls] == ["notify_farmer"]
+    assert [(c.tool_name, c.status) for c in result.tool_calls] == [("notify_farmer", "ok")]
     assert tools._store.snapshot()["farmer.F-001.notified_count"] == 1

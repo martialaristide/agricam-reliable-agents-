@@ -168,8 +168,12 @@ def main() -> None:
             "Base des campagnes", value=database_url_from_env(),
             help=f"URL SQLAlchemy ; par défaut la variable {DATABASE_URL_ENV_VAR}.",
         )
-        repository = get_repository(url)
-        campaigns = repository.list_campaigns()
+        try:
+            repository = get_repository(url)
+            campaigns = repository.list_campaigns()
+        except Exception as exc:  # noqa: BLE001 - toute URL invalide doit rester lisible, pas planter la page
+            st.error(f"Impossible d'ouvrir cette base : {exc}")
+            st.stop()
         if not campaigns:
             st.info("Aucune campagne dans cette base. Lancez d'abord "
                     "`PYTHONPATH=src python scripts/run_campaign.py`.")
@@ -211,26 +215,26 @@ def main() -> None:
     left, right = st.columns((1, 1))
     with left:
         st.subheader("Fiabilité par tâche")
-        st.plotly_chart(reliability_chart(reports, palette), use_container_width=True)
+        st.plotly_chart(reliability_chart(reports, palette), width="stretch")
     with right:
         st.subheader("Effondrement avec la répétition (pass^k)")
         task_order = list(reports["task_id"])
         if len(task_order) > MAX_SERIES:
             st.caption(f"Seules les {MAX_SERIES} premières tâches sont colorées ; les autres sont en gris.")
         curves = queries.pass_k_frame(repository.list_reports(campaign_id), k_max)
-        st.plotly_chart(pass_k_chart(curves, task_order, palette), use_container_width=True)
+        st.plotly_chart(pass_k_chart(curves, task_order, palette), width="stretch")
 
     with st.expander("Tableau des rapports"):
         st.dataframe(
             reports.style.format({c: "{:.3f}" for c in reports.columns if reports[c].dtype.kind == "f"}),
-            use_container_width=True, hide_index=True,
+            width="stretch", hide_index=True,
         )
 
     # ---- Comparaison entre campagnes ----------------------------------------------
     if compare_ids:
         st.subheader("Comparaison entre campagnes")
         comparison = queries.comparison_frame(repository, [campaign_id, *compare_ids])
-        st.plotly_chart(comparison_chart(comparison, palette), use_container_width=True)
+        st.plotly_chart(comparison_chart(comparison, palette), width="stretch")
 
     # ---- Essais et incidents --------------------------------------------------------
     st.subheader("Essais")
@@ -243,7 +247,7 @@ def main() -> None:
         filtered = filtered[filtered["overconfidence_detected"]]
     st.dataframe(
         filtered.drop(columns=["recorded_at"]),
-        use_container_width=True, hide_index=True,
+        width="stretch", hide_index=True,
         column_config={
             "verified_success": st.column_config.CheckboxColumn("✅ vérifié"),
             "declared_success": st.column_config.CheckboxColumn("déclaré"),
@@ -259,7 +263,7 @@ def main() -> None:
     if incidents.empty:
         st.caption("Aucun incident journalisé pour cette campagne.")
     else:
-        st.dataframe(incidents, use_container_width=True, hide_index=True,
+        st.dataframe(incidents, width="stretch", hide_index=True,
                      column_config={"blocked": st.column_config.CheckboxColumn("🛡️ bloqué")})
 
 

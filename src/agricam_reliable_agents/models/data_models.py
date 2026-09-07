@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 
 def utcnow() -> datetime:
@@ -57,13 +57,29 @@ class Task:
             raise TypeError("expected_state_delta doit être un dict.")
 
 
+ToolCallStatus = Literal["ok", "refused", "error"]
+
+
 @dataclass(frozen=True, slots=True)
 class ToolCall:
-    """Un appel d'outil MCP effectué par l'agent, horodaté pour l'audit."""
+    """
+    Un appel d'outil MCP demandé par l'agent, horodaté pour l'audit.
+
+    `status` dit ce qu'il est advenu de l'appel : `ok` (exécuté), `refused`
+    (bloqué par la politique de sécurité) ou `error` (rejeté par l'outil :
+    entité inconnue, arguments invalides) ; `error` porte alors le message
+    renvoyé au modèle. Un appel refusé ou en erreur n'a modifié aucun état.
+    """
 
     tool_name: str
     arguments: dict[str, Any]
     timestamp: datetime = field(default_factory=utcnow)
+    status: ToolCallStatus = "ok"
+    error: str | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.status == "ok"
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,3 +161,4 @@ class SecurityIncident:
     payload: str
     blocked: bool
     detected_at: datetime = field(default_factory=utcnow)
+    task_id: str | None = None

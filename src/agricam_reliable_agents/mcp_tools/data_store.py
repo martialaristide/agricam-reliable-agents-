@@ -70,8 +70,23 @@ class AgriCamDataStore:
         self._farmers: dict[str, Farmer] = {}
         self._parcel_farmer: dict[str, str] = {}
 
-    # ---- Semences de démonstration -------------------------------------
+    # ---- Cycle de vie des données -----------------------------------------
+    def is_empty(self) -> bool:
+        return not (self._sensor_readings or self._diagnostics or self._products or self._farmers)
+
+    def reset(self) -> None:
+        """Vide tout l'état (même contrat que `SqlAlchemyDataStore.reset`)."""
+        self._sensor_readings.clear()
+        self._diagnostics.clear()
+        self._products.clear()
+        self._farmers.clear()
+        self._parcel_farmer.clear()
+
     def seed_demo_data(self) -> None:
+        """Jeu de démonstration ; sans effet si le store contient déjà des
+        données (idempotent, comme le store SQL)."""
+        if not self.is_empty():
+            return
         now = datetime.now(timezone.utc)
         self._sensor_readings.extend([
             SensorReading("P-001", "humidity", 78.5, now),
@@ -105,7 +120,9 @@ class AgriCamDataStore:
         return self._diagnostics[diagnostic_id]
 
     def get_diagnostic_history(self, parcel_id: str | None = None, limit: int = 20) -> list[Diagnostic]:
-        values = list(self._diagnostics.values())
+        if limit <= 0:
+            return []
+        values = sorted(self._diagnostics.values(), key=lambda d: d.id)
         if parcel_id is not None:
             values = [d for d in values if d.parcel_id == parcel_id]
         return values[:limit]
@@ -127,6 +144,8 @@ class AgriCamDataStore:
         diagnostic.status = "treated"
 
     def decrement_stock(self, product_id: str, quantity: int = 1) -> None:
+        if quantity <= 0:
+            raise ValueError("quantity doit être strictement positif.")
         product = self.get_product(product_id)
         if product.stock_qty < quantity:
             raise AgriCamDataError(f"Stock insuffisant pour {product_id!r}.")
@@ -154,9 +173,17 @@ class AgriCamDataStore:
 class DataStore(Protocol):
     """
     Contrat minimal attendu par `AgriCamTools` et par le harnais (via
-    `snapshot`). Toute implémentation doit lever `AgriCamDataError` pour
-    une entité inconnue ou un stock insuffisant.
+    `snapshot`, `reset`, `seed_demo_data`). Toute implémentation doit :
+    - lever `AgriCamDataError` pour une entité inconnue ou un stock
+      insuffisant, `ValueError` pour une quantité non positive ;
+    - avoir un `seed_demo_data` idempotent (sans effet si non vide) et un
+      `reset` qui vide tout, pour qu'un `before_trial` soit portable ;
+    - renvoyer `[]` pour `limit <= 0` et trier l'historique par identifiant.
     """
+
+    def is_empty(self) -> bool: ...
+
+    def reset(self) -> None: ...
 
     def seed_demo_data(self) -> None: ...
 
