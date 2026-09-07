@@ -10,16 +10,24 @@ couche de sécurité, persistance SQL des campagnes et dashboard Streamlit.
 Tout le code de ce dépôt a été **réellement exécuté** (pas seulement
 rédigé) au moment de la livraison :
 
-- ✅ 124 tests unitaires et d'intégration, tous passants
+- ✅ 178 tests unitaires et d'intégration, tous passants
 - ✅ 99 % de couverture de code (`pytest-cov`)
 - ✅ 0 avertissement `ruff` (lint complet)
 - ✅ Scripts de démonstration et de campagne exécutés bout en bout
 - ✅ Dashboard rendu sans erreur via `streamlit.testing.v1.AppTest`
+- ✅ Interface de vérification : API testée par `TestClient`, écrans rendus
+  en Chrome headless et inspectés
+- ✅ Audit expert indépendant (7 septembre 2026) : 2 défauts bloquants,
+  9 importants et 11 mineurs relevés, tous corrigés et verrouillés par
+  `tests/test_audit_fixes.py`
 
 Seul l'appel réseau de `AnthropicLLMClient` (agent/llm_client.py) n'est pas
 exercé par les tests : il nécessite une clé `ANTHROPIC_API_KEY` valide. Le
-client est couvert à 100 % par des mocks du SDK `anthropic` (retry, backoff,
-normalisation des réponses), et toute la logique de la boucle agent est
+client est couvert à 100 % par des mocks du SDK `anthropic` : retry et
+backoff, normalisation de **tous** les blocs `tool_use` d'une réponse
+(appel d'outils parallèle, actif par défaut), rejeu du contenu brut du
+tour assistant (blocs `thinking` du raisonnement adaptatif d'Opus 5
+inclus), troncature `max_tokens`. Toute la logique de la boucle agent est
 testée avec des clients LLM factices (`tests/test_agent_loop.py`).
 
 ## Installation
@@ -58,8 +66,10 @@ agent** (`run_agent`) avec les **vrais outils MCP** sur un store SQL, sous
 la garde de sécurité, sur trois tâches de complexité croissante (1, 3 et
 6 étapes). Un LLM simulé suit le plan de chaque tâche et, à chaque étape,
 se trompe d'identifiant avec probabilité `1 − p-step`, puis **déclare
-quand même avoir réussi** : le Success Verifier le rattrape. Résultat
-typique (`p-step = 0.9`, 30 essais) :
+quand même avoir réussi** : le Success Verifier le rattrape. Ce qui est
+jugé est l'état réel, pas le respect du plan : une dérive sur la lecture
+finale de la tâche à 6 étapes laisse l'état conforme, donc le taux attendu
+de cette tâche est `p-step^5`. Résultat typique (`p-step = 0.9`, 30 essais) :
 
 ```
 Tâche              Complexité   n succès     p̂   IC Wilson 95 %  pass^1  pass^3  pass^5  pass^10 sur-conf.
@@ -80,7 +90,39 @@ Avec une clé API, `--llm anthropic` remplace le LLM simulé par
 `AnthropicLLMClient` (modèle `--model` ou `AGRICAM_MODEL`). Chaque essai
 consomme de vrais appels API.
 
-## Dashboard (phase 5)
+## Interface de vérification (application web sur mesure)
+
+```bash
+PYTHONPATH=src python -m agricam_reliable_agents.api
+# puis ouvrir http://127.0.0.1:8765/
+```
+
+L'écran que l'on regarde pour **décider si l'agent peut être déployé**.
+Six écrans, dessinés comme des instruments de contrôle statistique
+(plan de design et auto-critique : `docs/interface/plan-de-design.md`) :
+
+1. **Campagnes** : registre des campagnes, fiabilité déjà lisible sur une
+   règle graduée, lancement d'une campagne simulée depuis l'interface
+   (exécutée sur le serveur, suivie « en cours » puis « terminée »).
+2. **Tâche** : règle de Wilson (p̂ et son intervalle), courbe pass^k avec
+   seuil de décision réglable, bande d'incertitude et zone hors contrôle
+   hachurée, carte de contrôle des essais (● vérifié, ○ échec avoué,
+   ■ sur-confiance), tableau des essais.
+3. **Essai** : verdict du Success Verifier, appels d'outils avec leur
+   statut (exécuté, refusé par la garde, rejeté par l'outil), état attendu
+   contre état observé ligne à ligne.
+4. **Sécurité** : incidents par catégorie OWASP LLM, non bloqués en tête.
+5. **Coût et latence** : par tâche et dans le temps.
+6. **Comparer** : deux campagnes côte à côte, régressions en tête (la
+   borne haute de l'intervalle « après » passe sous le p̂ « avant »).
+
+Stack : API JSON Starlette (`src/agricam_reliable_agents/api/app.py`, huit
+routes sur le schéma SQL existant, testées dans `tests/test_api.py`) et
+front HTML/CSS/JavaScript sans framework ni build, graphiques en SVG
+dessinés à la main (`api/static/`). Streamlit a été écarté pour cette
+interface : son thème est l'esthétique générique que le brief interdit.
+
+## Dashboard Streamlit (exploration rapide)
 
 ```bash
 PYTHONPATH=src streamlit run dashboard/app.py
@@ -182,6 +224,34 @@ réels en mémoire et en sous-processus stdio ; `tests/test_mcp_server_env.py`
 vérifie la sélection du store par `AGRICAM_DATABASE_URL`, y compris en
 sous-processus avec persistance dans un fichier SQLite.
 
+## Corrections issues de l'audit expert
+
+Un audit indépendant du code (7 septembre 2026) a relevé et fait corriger :
+
+- **bloquants (mode LLM réel)** : un seul `tool_use` retenu par réponse et
+  blocs `thinking` supprimés de l'historique, qui provoquaient des 400 dès
+  qu'Opus 5 appelait plusieurs outils ou raisonnait (`raw_content` rejoué
+  tel quel, tous les `tool_result` dans un seul message) ;
+- **importants** : `TypeError`/`ValueError` d'un appel d'outil mal formé
+  qui faisait tomber la campagne ; `stop_reason == "max_tokens"` archivé
+  comme échec d'agent ; détection de succès trop étroite (« marqué comme
+  traité et notifié » non reconnu) ; périmètre de parcelle non appliqué à
+  `recommend_treatment` ; contrats `seed_demo_data`/`reset` divergents
+  entre les stores ; `is_empty` partiel ; définition de tâche réécrite
+  entre campagnes (désormais figée dans chaque essai) ; appels refusés ou
+  en erreur absents de l'audit (désormais archivés avec leur statut) ;
+  incidents sans identifiant de tâche ;
+- **mineurs** : détection des URL SQLite mémoire, `limit <= 0` et quantité
+  négative, second traitement qui consommait le stock, pass^k sans
+  intervalle (désormais l'image de l'intervalle de Wilson), tarif du
+  modèle, charge d'incident en repr Python, longueur du message de
+  notification, robustesse du dashboard.
+
+Les bases SQLite créées avant ces corrections n'ont pas les nouvelles
+colonnes (`trials.complexity`, `trials.expected_state_delta`,
+`security_incidents.task_id`) : supprimez le fichier `.db` et relancez une
+campagne.
+
 ## Structure
 
 ```
@@ -193,11 +263,13 @@ src/agricam_reliable_agents/
 │   ├── tools.py                # Les 5 outils MCP (schémas + implémentations)
 │   └── server.py               # Serveur MCP stdio (SDK officiel)
 ├── agent/                      # Boucle ReAct + client LLM découplé
+├── api/                        # Interface de vérification (Starlette + static/)
 ├── reliability/
 │   ├── stats.py                # Wilson, pass^k
 │   ├── harness.py              # evaluate_task / evaluate_reliability
 │   ├── repository.py           # Dépôt persistant des campagnes
-│   └── campaign.py             # Harnais + dépôt
+│   ├── campaign.py             # Harnais + dépôt
+│   └── simulation.py           # Campagne simulée bout en bout (CLI et API)
 ├── verifier/                   # Success Verifier (diff d'état)
 ├── security/                   # Policy, guard, sanitizer (OWASP LLM)
 ├── persistence/engine.py       # Fabrique de moteur (AGRICAM_DATABASE_URL)
@@ -205,7 +277,8 @@ src/agricam_reliable_agents/
 dashboard/app.py                # Application Streamlit
 scripts/demo_full_pipeline.py   # Démonstration numérique sans API
 scripts/run_campaign.py         # Campagne persistée (LLM simulé ou Anthropic)
-tests/                          # 124 tests, 99 % de couverture
+docs/interface/plan-de-design.md # Passe 1 du brief interface (tokens, wireframes, auto-critique)
+tests/                          # 178 tests, 99 % de couverture
 ```
 
 ## Licence

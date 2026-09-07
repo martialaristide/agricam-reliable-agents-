@@ -1,0 +1,243 @@
+/* Interface de vérification AgriCam Reliable Agents.
+   Tokens et principes : docs/interface/plan-de-design.md.
+   Parti pris : carte de contrôle statistique. Filets, pas de cartes ;
+   la forme porte l'état, la couleur le confirme ; aucun chiffre nu. */
+
+:root {
+  --papier: #E4E9E3;
+  --cadran: #F7F9F6;
+  --encre: #14231C;
+  --gravure: #55635A;
+  --verifie: #1F6F4A;
+  --alerte: #B3261E;
+  --grille: rgba(20, 35, 28, 0.09);
+  --filet-fin: rgba(20, 35, 28, 0.22);
+  --titre: "Barlow Condensed", "Arial Narrow", "Helvetica Neue", sans-serif;
+  --texte: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --regle-largeur: 224px;
+  color-scheme: light;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { background: var(--papier); }
+
+body {
+  margin: 0;
+  font-family: var(--texte);
+  font-size: 15px;
+  line-height: 1.45;
+  color: var(--encre);
+  background: var(--papier);
+  -webkit-font-smoothing: antialiased;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
+}
+
+:focus-visible { outline: 2px solid var(--encre); outline-offset: 2px; }
+.regle :focus-visible { outline-color: var(--papier); }
+
+.saut {
+  position: absolute; left: -999px; top: 8px;
+  background: var(--encre); color: var(--papier); padding: 8px 12px; z-index: 10;
+}
+.saut:focus { left: 8px; }
+
+a { color: inherit; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+
+/* ---- Structure : règle verticale + feuille ---------------------------- */
+
+.cadre { display: grid; grid-template-columns: var(--regle-largeur) minmax(0, 1fr); min-height: 100vh; }
+
+.regle {
+  position: sticky; top: 0; height: 100vh; overflow: auto;
+  background: var(--encre); color: var(--papier);
+  padding: 24px 0 24px 0;
+  border-right: 1px solid var(--encre);
+}
+.regle .marque {
+  font-family: var(--titre); font-weight: 600; font-size: 22px; line-height: 1.05;
+  padding: 0 20px 20px 20px; margin: 0;
+}
+.regle .marque small { display: block; font-size: 14px; font-weight: 500; opacity: .75; margin-top: 4px; }
+.regle .courante {
+  padding: 12px 20px; border-top: 1px solid rgba(228, 233, 227, .25); border-bottom: 1px solid rgba(228, 233, 227, .25);
+  font-size: 13px; opacity: .9;
+}
+.regle .courante b { display: block; font-family: var(--titre); font-size: 18px; font-weight: 600; margin-top: 2px; }
+.regle ul { list-style: none; margin: 8px 0 0 0; padding: 0; }
+.regle li { margin: 0; }
+.canal {
+  display: grid; grid-template-columns: 16px 1fr; align-items: center; gap: 8px;
+  padding: 9px 20px 9px 12px; text-decoration: none;
+  font-family: var(--titre); font-weight: 500; font-size: 18px; letter-spacing: .01em;
+  color: var(--papier); opacity: .82;
+}
+.canal .trait { width: 12px; height: 1px; background: var(--papier); opacity: .45; }
+.canal[aria-current="page"] { opacity: 1; background: rgba(228, 233, 227, .10); }
+.canal[aria-current="page"] .trait { width: 16px; height: 2px; opacity: 1; }
+.canal:hover { opacity: 1; }
+.canal abbr { display: none; text-decoration: none; }
+.regle .separateur { height: 1px; background: rgba(228, 233, 227, .25); margin: 12px 20px; }
+.regle .pied { padding: 16px 20px 0 20px; font-size: 12px; opacity: .6; }
+
+.feuille { padding: 36px 40px 64px 40px; max-width: 1180px; width: 100%; min-width: 0; }
+
+/* ---- Typographie ------------------------------------------------------- */
+
+h1, h2, h3 { font-family: var(--titre); font-weight: 600; margin: 0; line-height: 1.1; }
+h1 { font-size: 36px; }
+h2 { font-size: 24px; margin-top: 8px; }
+h3 { font-size: 19px; font-weight: 500; }
+.fil { font-size: 14px; color: var(--gravure); margin: 0 0 10px 0; }
+.fil a { color: var(--gravure); }
+.sous-titre { margin: 6px 0 0 0; color: var(--gravure); max-width: 72ch; }
+.sous-titre em { font-style: italic; }
+p { margin: 8px 0; }
+.note { font-size: 13px; color: var(--gravure); }
+.num, .tabulaire { font-variant-numeric: tabular-nums; }
+th.num, td.num { text-align: right; }
+
+.filet { border: 0; border-top: 1px solid var(--encre); margin: 20px 0; }
+.filet-fin { border: 0; border-top: 1px solid var(--filet-fin); margin: 14px 0; }
+
+.en-tete { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
+
+/* ---- Bandeau d'instrument (mesures en ligne, séparées par des filets) -- */
+
+.bandeau { display: flex; flex-wrap: wrap; margin: 0; padding: 0; list-style: none; }
+.bandeau .mesure { padding: 4px 24px 4px 0; margin: 4px 24px 4px 0; border-right: 1px solid var(--filet-fin); min-width: 120px; }
+.bandeau .mesure:last-child { border-right: 0; }
+.mesure b { display: block; font-size: 26px; font-weight: 600; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.mesure .etiquette { display: block; font-family: var(--titre); font-size: 15px; font-weight: 500; color: var(--gravure); }
+.mesure .incertitude { display: block; font-size: 12px; color: var(--gravure); margin-top: 2px; }
+.mesure.mesure-alerte b { color: var(--alerte); }
+.mesure.mesure-verifie b { color: var(--verifie); }
+
+/* ---- Tableaux ------------------------------------------------------------ */
+
+.defilant { overflow-x: auto; }
+.tableau { width: 100%; border-collapse: collapse; font-size: 14px; }
+.tableau th {
+  font-family: var(--titre); font-weight: 600; font-size: 16px; text-align: left;
+  padding: 6px 10px 6px 0; border-bottom: 1px solid var(--encre); white-space: nowrap;
+}
+.tableau td { padding: 8px 10px 8px 0; border-bottom: 1px solid var(--filet-fin); vertical-align: middle; }
+.tableau tr.ligne-alerte td { background: rgba(179, 38, 30, .07); }
+.tableau tr.ligne-alerte td:first-child { box-shadow: inset 4px 0 0 var(--alerte); padding-left: 8px; }
+.tableau .lien-ligne { font-weight: 600; }
+.tableau .mini { width: 160px; height: 16px; display: block; }
+.tableau code { font-family: var(--texte); background: rgba(20, 35, 28, .06); padding: 1px 4px; }
+
+/* ---- Figures (papier millimétré uniquement ici) -------------------------- */
+
+.figure {
+  background-color: var(--cadran);
+  background-image: linear-gradient(var(--grille) 1px, transparent 1px), linear-gradient(90deg, var(--grille) 1px, transparent 1px);
+  background-size: 8px 8px;
+  border: 1px solid var(--encre);
+  padding: 12px 12px 8px 12px;
+  margin: 10px 0 6px 0;
+}
+.figure svg { display: block; width: 100%; height: auto; }
+.figure svg text { font-family: var(--texte); font-size: 12px; fill: var(--gravure); font-variant-numeric: tabular-nums; }
+.figure svg text.gravee { font-family: var(--titre); font-weight: 600; font-size: 13px; fill: var(--encre); }
+.figure svg text.valeur { fill: var(--encre); font-weight: 600; }
+.figure svg text.alerte { fill: var(--alerte); font-weight: 600; }
+.figure svg a:focus-visible { outline: none; }
+.figure svg a:focus-visible .marque-essai { stroke: var(--encre); stroke-width: 3; }
+.legende { display: flex; gap: 20px; flex-wrap: wrap; font-size: 13px; color: var(--gravure); margin: 6px 0 0 0; }
+.figure-titre { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+.figure-titre label { font-size: 13px; color: var(--gravure); }
+.figure-titre input[type="number"] {
+  font: inherit; width: 64px; padding: 2px 6px; border: 1px solid var(--encre); background: var(--cadran); color: var(--encre);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- États d'essai : la forme d'abord ------------------------------------ */
+
+.etat { white-space: nowrap; }
+.etat::before { display: inline-block; width: 1.1em; margin-right: 4px; text-align: center; font-size: 1em; }
+.etat-verifie::before { content: "●"; color: var(--verifie); }
+.etat-echec::before { content: "○"; color: var(--encre); }
+.etat-surconfiance::before { content: "■"; color: var(--alerte); }
+.etat-surconfiance { color: var(--alerte); font-weight: 600; }
+.etat-bloque::before { content: "●"; color: var(--verifie); }
+.etat-nonbloque::before { content: "■"; color: var(--alerte); }
+.etat-nonbloque { color: var(--alerte); font-weight: 600; }
+.etat-regression::before { content: "■"; color: var(--alerte); }
+.etat-regression { color: var(--alerte); font-weight: 600; }
+.etat-baisse::before { content: "◔"; color: var(--gravure); }
+.etat-stable::before { content: "○"; color: var(--encre); }
+.etat-progres::before { content: "●"; color: var(--verifie); }
+.etat-incomparable::before { content: "–"; color: var(--gravure); }
+
+/* ---- Verdict, alertes, états vides --------------------------------------- */
+
+.verdict { border-left: 4px solid var(--encre); padding: 10px 16px; margin: 12px 0; background: var(--cadran); }
+.verdict-surconfiance { border-left-color: var(--alerte); }
+.verdict-verifie { border-left-color: var(--verifie); }
+.verdict b { font-family: var(--titre); font-size: 20px; font-weight: 600; display: block; }
+.verdict-surconfiance b { color: var(--alerte); }
+.verdict-verifie b { color: var(--verifie); }
+
+.alerte-bloc { border: 1px solid var(--alerte); border-left-width: 6px; padding: 12px 16px; margin: 12px 0; background: var(--cadran); }
+.alerte-bloc h2 { color: var(--alerte); }
+
+.vide { border: 1px dashed var(--gravure); padding: 24px; margin: 16px 0; max-width: 62ch; }
+.vide p { margin: 0 0 12px 0; }
+.erreur { border: 1px solid var(--alerte); padding: 12px 16px; margin: 16px 0; max-width: 62ch; }
+
+/* ---- Boutons et formulaires ------------------------------------------------ */
+
+.bouton {
+  font-family: var(--titre); font-weight: 600; font-size: 17px; letter-spacing: .01em;
+  background: var(--encre); color: var(--papier); border: 1px solid var(--encre);
+  padding: 8px 16px; cursor: pointer; text-decoration: none; display: inline-block;
+}
+.bouton:hover { background: var(--gravure); border-color: var(--gravure); }
+.bouton[disabled] { opacity: .5; cursor: default; }
+.bouton-secondaire { background: transparent; color: var(--encre); }
+.bouton-secondaire:hover { background: rgba(20, 35, 28, .08); color: var(--encre); }
+
+.formulaire { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px 20px; align-items: end; margin: 12px 0; max-width: 820px; }
+.formulaire label { display: block; font-size: 13px; color: var(--gravure); }
+.formulaire input, .formulaire select {
+  font: inherit; width: 100%; padding: 6px 8px; margin-top: 4px;
+  border: 1px solid var(--encre); background: var(--cadran); color: var(--encre);
+}
+.formulaire .action { grid-column: 1 / -1; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+
+details.lancement summary { cursor: pointer; font-family: var(--titre); font-size: 18px; font-weight: 600; }
+
+/* ---- Deux colonnes (diff, appels d'outils) ---------------------------------- */
+
+.colonnes { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; }
+.diff td.diff-manquant, .diff td.diff-different { color: var(--alerte); font-weight: 600; }
+.diff td.diff-ok { color: var(--verifie); }
+.diff td.diff-inattendu { color: var(--gravure); font-style: italic; }
+.appels ol { margin: 8px 0 0 0; padding-left: 22px; }
+.appels li { margin: 6px 0; }
+.appels .args { color: var(--gravure); font-size: 13px; }
+.citation { border-left: 2px solid var(--gravure); padding: 6px 12px; margin: 8px 0; font-style: italic; }
+
+/* ---- Responsive ----------------------------------------------------------------- */
+
+@media (max-width: 960px) {
+  .colonnes { grid-template-columns: 1fr; }
+  .feuille { padding: 28px 24px 48px 24px; }
+}
+
+@media (max-width: 720px) {
+  :root { --regle-largeur: 56px; }
+  .regle .marque { font-size: 14px; padding: 0 8px 12px 8px; }
+  .regle .marque small, .regle .courante, .regle .pied { display: none; }
+  .canal { grid-template-columns: 1fr; padding: 10px 8px; justify-items: center; font-size: 16px; }
+  .canal .trait, .canal span { display: none; }
+  .canal abbr { display: inline; }
+  .feuille { padding: 20px 14px 40px 14px; }
+  h1 { font-size: 28px; }
+  .bandeau .mesure { min-width: 100px; margin-right: 16px; padding-right: 16px; }
+}
