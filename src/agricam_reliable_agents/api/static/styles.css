@@ -204,10 +204,13 @@ th.num, td.num { text-align: right; }
 
 .formulaire { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px 20px; align-items: end; margin: 12px 0; max-width: 820px; }
 .formulaire label { display: block; font-size: 13px; color: var(--gravure); }
-.formulaire input, .formulaire select {
+.formulaire input, .formulaire select, .formulaire textarea {
   font: inherit; width: 100%; padding: 6px 8px; margin-top: 4px;
   border: 1px solid var(--encre); background: var(--cadran); color: var(--encre);
 }
+.formulaire textarea { resize: vertical; min-height: 64px; }
+.formulaire textarea.code { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 13px; }
+.formulaire .large { grid-column: 1 / -1; }
 .formulaire .action { grid-column: 1 / -1; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 
 details.lancement summary { cursor: pointer; font-family: var(--titre); font-size: 18px; font-weight: 600; }

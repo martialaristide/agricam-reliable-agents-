@@ -12,7 +12,7 @@ interface de vérification sur mesure, et **Connecteur d'Agent Générique**
 Tout le code de ce dépôt a été **réellement exécuté** (pas seulement
 rédigé) au moment de la livraison :
 
-- ✅ 356 tests unitaires et d'intégration, tous passants
+- ✅ 379 tests unitaires et d'intégration, tous passants
 - ✅ 99 % de couverture de code (`pytest-cov`), chaque module du
   connecteur individuellement ≥ 98 %
 - ✅ 0 avertissement `ruff` (lint complet)
@@ -105,7 +105,7 @@ PYTHONPATH=src python -m agricam_reliable_agents.api
 ```
 
 L'écran que l'on regarde pour **décider si l'agent peut être déployé**.
-Six écrans, dessinés comme des instruments de contrôle statistique
+Sept écrans, dessinés comme des instruments de contrôle statistique
 (plan de design et auto-critique : `docs/interface/plan-de-design.md`) :
 
 1. **Campagnes** : registre des campagnes, fiabilité déjà lisible sur une
@@ -122,12 +122,24 @@ Six écrans, dessinés comme des instruments de contrôle statistique
 5. **Coût et latence** : par tâche et dans le temps.
 6. **Comparer** : deux campagnes côte à côte, régressions en tête (la
    borne haute de l'intervalle « après » passe sous le p̂ « avant »).
+7. **Connecter un agent** (section 5 du document de référence du
+   connecteur générique) : déclarer une connexion (REST, MCP, CLI, appel
+   direct modèle) et son environnement, définir les tâches à tester,
+   obtenir une proposition d'oracle par inférence de contrat puis
+   l'approuver explicitement — jamais automatiquement. Cet écran ne
+   lance pas lui-même de campagne contre un connecteur tiers (appels
+   réseau/sous-processus réels depuis le serveur web, hors périmètre de
+   cette passe) : une fois la connexion et l'oracle validés ici, la
+   campagne se lance avec `connector/bridge.py` + `evaluate_task` (voir
+   plus bas) et apparaît ensuite dans les écrans ci-dessus sans traitement
+   particulier.
 
-Stack : API JSON Starlette (`src/agricam_reliable_agents/api/app.py`, huit
-routes sur le schéma SQL existant, testées dans `tests/test_api.py`) et
-front HTML/CSS/JavaScript sans framework ni build, graphiques en SVG
-dessinés à la main (`api/static/`). Streamlit a été écarté pour cette
-interface : son thème est l'esthétique générique que le brief interdit.
+Stack : API JSON Starlette (`src/agricam_reliable_agents/api/app.py`, sur
+le schéma SQL existant et `connector/oracle_repository.py`, testées dans
+`tests/test_api.py` et `tests/test_api_connector.py`) et front
+HTML/CSS/JavaScript sans framework ni build, graphiques en SVG dessinés
+à la main (`api/static/`). Streamlit a été écarté pour cette interface :
+son thème est l'esthétique générique que le brief interdit.
 
 ## Dashboard Streamlit (exploration rapide)
 
@@ -377,7 +389,7 @@ dashboard/app.py                # Application Streamlit
 scripts/demo_full_pipeline.py   # Démonstration numérique sans API
 scripts/run_campaign.py         # Campagne persistée (LLM simulé ou Anthropic)
 docs/interface/plan-de-design.md # Passe 1 du brief interface (tokens, wireframes, auto-critique)
-tests/                          # 356 tests, 99 % de couverture
+tests/                          # 379 tests, 99 % de couverture
 ```
 
 ## Licence

@@ -269,6 +269,7 @@
       id ? canal("#/campagne/" + id + "/securite", "Sécurité", "S", r === "securite") : "",
       id ? canal("#/campagne/" + id + "/cout", "Coût et latence", "€", r === "cout") : "",
       canal("#/comparer", "Comparer", "≷", r === "comparer"),
+      canal("#/connecter", "Connecter un agent", "⚭", r === "connecter"),
     ].join("");
     document.getElementById("regle").innerHTML =
       '<p class="marque">AgriCam<br>Reliable Agents<small>Interface de vérification</small></p>' +
@@ -536,6 +537,196 @@
     };
   }
 
+  // ---- Connecter un agent (section 5 du document de référence) ------------------
+
+  function parseJson(raw, champ) {
+    const texte = (raw || "").trim();
+    if (!texte) return {};
+    try {
+      const valeur = JSON.parse(texte);
+      if (typeof valeur !== "object" || valeur === null || Array.isArray(valeur)) throw new Error("pas un objet");
+      return valeur;
+    } catch (e) {
+      throw new Error(champ + " doit être un objet JSON valide, ex. {\"clé\": \"valeur\"} (" + e.message + ").");
+    }
+  }
+
+  function oracleEtat(oracle) {
+    if (!oracle) return etat("echec", "aucun oracle défini");
+    if (oracle.validated_by_human) return etat("verifie", "validé par un humain");
+    return etat("surconfiance", (oracle.inferred ? "inféré, " : "") + "en attente de validation humaine");
+  }
+
+  async function vueConnecter() {
+    const [connexions, taches] = await Promise.all([
+      api("/api/connections").then((d) => d.connections),
+      api("/api/tasks").then((d) => d.tasks),
+    ]);
+
+    const ligneConnexion = (c) => "<tr><td><code>" + h(c.id) + "</code></td><td>" + h(c.connector_type) + "</td><td>" + h(c.environment) +
+      "</td><td>" + json(c.config) + "</td><td>" + (c.credential_ref ? "<code>" + h(c.credential_ref) + "</code>" : '<span class="note">aucune</span>') +
+      '</td><td class="tabulaire">' + h(date(c.created_at)) + "</td></tr>";
+    const tableauConnexions = connexions.length
+      ? '<div class="defilant"><table class="tableau"><thead><tr><th>Identifiant</th><th>Type</th><th>Environnement</th><th>Configuration</th><th>Identifiants</th><th>Créée le</th></tr></thead><tbody>' + connexions.map(ligneConnexion).join("") + "</tbody></table></div>"
+      : '<div class="vide"><p>Aucune connexion déclarée. Un connecteur REST, MCP, CLI ou appel direct modèle se déclare ici avant de définir les tâches à tester.</p></div>';
+
+    const ligneTache = (t) => "<tr><td><code>" + h(t.task_id) + "</code><br><span class=\"note\">" + h(t.category) + "</span></td>" +
+      "<td>" + h(t.complexity_label) + "</td><td>" + (t.prompt ? '<span class="note">« ' + h(t.prompt) + " »</span>" : "") +
+      "</td><td>" + oracleEtat(t.oracle) + (t.oracle && t.oracle.approved_fields.length ? '<br><span class="note">' + t.oracle.approved_fields.map(h).join(", ") + "</span>" : "") + "</td></tr>";
+    const tableauTaches = taches.length
+      ? '<div class="defilant"><table class="tableau"><thead><tr><th>Tâche</th><th>Complexité</th><th>Prompt</th><th>Oracle</th></tr></thead><tbody>' + taches.map(ligneTache).join("") + "</tbody></table></div>"
+      : '<div class="vide"><p>Aucune tâche définie pour l\'instant.</p></div>';
+
+    const optionsTaches = taches.map((t) => '<option value="' + h(t.task_id) + '">' + h(t.task_id) + "</option>").join("");
+    const optionsConnecteur = ["rest", "mcp", "direct_model", "cli"].map((v) => '<option value="' + v + '">' + v + "</option>").join("");
+    const optionsEnvironnement = ["test", "staging", "production"].map((v) => '<option value="' + v + '">' + v + "</option>").join("");
+    const optionsComplexite = [["1-2_steps", "1 à 2 étapes"], ["3-5_steps", "3 à 5 étapes"], ["6+_steps", "6 étapes ou plus"]]
+      .map(([v, l]) => '<option value="' + v + '">' + l + "</option>").join("");
+
+    const html = '<h1>Connecter un agent</h1>' +
+      '<p class="sous-titre">Brancher un agent tiers (REST, MCP, CLI ou appel direct modèle) sur le harnais de fiabilité, sans jamais deviner un oracle à votre place : chaque champ vérifié à chaque essai est choisi par une personne. Détail du format de chaque connecteur : <code>connector/README.md</code>.</p>' +
+      '<hr class="filet">' +
+      '<h2>1. Connexions d\'agent</h2><p class="note">Le champ « identifiants » est une référence (<code>vault://…</code>, <code>env:MA_VARIABLE</code>), jamais un secret en clair : une valeur qui y ressemble est refusée.</p>' +
+      tableauConnexions +
+      '<details class="lancement"><summary>Déclarer une connexion</summary>' +
+      '<form id="form-connexion" class="formulaire">' +
+      '<label>Identifiant<input name="id" placeholder="ex. agent-tiers-v1" required></label>' +
+      '<label>Type de connecteur<select name="connector_type">' + optionsConnecteur + '</select></label>' +
+      '<label>Environnement<select name="environment">' + optionsEnvironnement + '</select></label>' +
+      '<label>Référence d\'identifiants (facultatif)<input name="credential_ref" placeholder="vault://... ou env:..."></label>' +
+      '<label class="large">Configuration (JSON, ex. endpoint, commande, prompt système)<textarea name="config" class="code" placeholder=\'{"endpoint": "https://mon-agent.example/chat"}\'></textarea></label>' +
+      '<div class="action"><button class="bouton" type="submit">Enregistrer la connexion</button></div>' +
+      '<p class="erreur" id="erreur-connexion" hidden></p></form></details>' +
+      '<hr class="filet-fin">' +
+      '<h2>2. Tâches à tester</h2>' + tableauTaches +
+      '<details class="lancement"><summary>Définir une tâche</summary>' +
+      '<form id="form-tache" class="formulaire">' +
+      '<label>Identifiant<input name="id" placeholder="ex. T-EXT-1" required></label>' +
+      '<label>Catégorie<input name="category" placeholder="ex. externe" required></label>' +
+      '<label>Complexité<select name="complexity">' + optionsComplexite + '</select></label>' +
+      '<label>Requête de vérification<input name="verification_query" placeholder="identifiant interne, ex. q-ext-1" required></label>' +
+      '<label class="large">Prompt<textarea name="prompt" required placeholder="Ce que l\'agent doit accomplir."></textarea></label>' +
+      '<label class="large">État attendu après succès (JSON)<textarea name="expected_state_delta" class="code" placeholder=\'{"diagnostic.D-1.status": "treated"}\'></textarea></label>' +
+      '<div class="action"><button class="bouton" type="submit">Enregistrer la tâche</button></div>' +
+      '<p class="erreur" id="erreur-tache" hidden></p></form></details>' +
+      '<hr class="filet-fin">' +
+      '<h2>3. Proposer puis valider un oracle</h2>' +
+      '<p class="note">L\'inférence de contrat ne fait que proposer un point de départ à partir du schéma de retour d\'un outil ; elle ne valide jamais rien elle-même — voir <code>connector/contract_inference.py</code>. L\'approbation ci-dessous est l\'acte humain séparé qui rend l\'oracle utilisable par une campagne.</p>' +
+      '<div class="colonnes">' +
+      '<section><h3>Proposer (assistance)</h3>' +
+      '<form id="form-inference" class="formulaire">' +
+      '<label class="large">Schéma de retour de l\'outil (JSON)<textarea name="tool_schema" class="code" placeholder=\'{"properties": {"status": {"type": "string"}}}\'></textarea></label>' +
+      '<div class="action"><button class="bouton bouton-secondaire" type="submit">Proposer un oracle</button></div>' +
+      '<p class="erreur" id="erreur-inference" hidden></p></form>' +
+      '<div id="resultat-inference"></div></section>' +
+      '<section><h3>Approuver (acte humain)</h3>' +
+      '<form id="form-approbation" class="formulaire">' +
+      '<label>Tâche<select name="task_id" required><option value="">choisir…</option>' + optionsTaches + '</select></label>' +
+      '<label>Politique des champs non prévus<select name="unexpected_field_policy"><option value="flag">signaler</option><option value="ignore">ignorer</option></select></label>' +
+      '<label class="large">Champs approuvés (un par ligne, ex. diagnostic.D-1.status)<textarea name="approved_fields" required></textarea></label>' +
+      '<div class="action"><button class="bouton" type="submit">Valider cet oracle</button></div>' +
+      '<p class="erreur" id="erreur-approbation" hidden></p></form></section>' +
+      "</div>" +
+      '<hr class="filet-fin">' +
+      '<h2>4. Environnement et lancement</h2>' +
+      '<p class="note">Une campagne visée sur « production » exige une confirmation explicite avant tout appel réel (<code>connector/environment.py</code>), et un mode d\'essai à blanc (« dry-run ») peut intercepter les outils à effet de bord pour rejouer un scénario sans rien modifier vraiment. Cette interface web ne déclenche pas elle-même de campagne contre un connecteur tiers : une fois la connexion et l\'oracle validés ici, lancez la campagne depuis un script Python qui appelle <code>reliability/harness.py::evaluate_task</code> avec ce connecteur (exemple complet dans <code>connector/README.md</code>) — elle apparaîtra ensuite dans les écrans « Campagnes » comme n\'importe quelle autre.</p>';
+
+    return {
+      html,
+      apres: () => {
+        const erreurDe = (id) => document.getElementById(id);
+
+        document.getElementById("form-connexion").addEventListener("submit", async (event) => {
+          event.preventDefault();
+          const erreur = erreurDe("erreur-connexion");
+          erreur.hidden = true;
+          const fd = new FormData(event.target);
+          try {
+            const config = parseJson(fd.get("config"), "La configuration");
+            await api("/api/connections", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                id: fd.get("id"), connector_type: fd.get("connector_type"), environment: fd.get("environment"),
+                config, credential_ref: fd.get("credential_ref") || null,
+              }),
+            });
+            await naviguer();
+          } catch (e) {
+            erreur.textContent = e.message;
+            erreur.hidden = false;
+          }
+        });
+
+        document.getElementById("form-tache").addEventListener("submit", async (event) => {
+          event.preventDefault();
+          const erreur = erreurDe("erreur-tache");
+          erreur.hidden = true;
+          const fd = new FormData(event.target);
+          try {
+            const expected_state_delta = parseJson(fd.get("expected_state_delta"), "L'état attendu");
+            await api("/api/tasks", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                id: fd.get("id"), prompt: fd.get("prompt"), complexity: fd.get("complexity"),
+                category: fd.get("category"), verification_query: fd.get("verification_query"),
+                expected_state_delta,
+              }),
+            });
+            await naviguer();
+          } catch (e) {
+            erreur.textContent = e.message;
+            erreur.hidden = false;
+          }
+        });
+
+        document.getElementById("form-inference").addEventListener("submit", async (event) => {
+          event.preventDefault();
+          const erreur = erreurDe("erreur-inference");
+          const resultat = document.getElementById("resultat-inference");
+          erreur.hidden = true;
+          resultat.innerHTML = "";
+          const fd = new FormData(event.target);
+          try {
+            const tool_schema = parseJson(fd.get("tool_schema"), "Le schéma");
+            const data = await api("/api/oracles/infer", {
+              method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tool_schema }),
+            });
+            if (!data.candidate) {
+              resultat.innerHTML = '<p class="note">Aucun signal exploitable dans ce schéma : complétez les champs approuvés à la main, à droite.</p>';
+            } else {
+              resultat.innerHTML = '<p class="note"><b>Champ proposé :</b> <code>' + h(data.candidate.suggested_fields.join(", ")) + "</code><br>" + h(data.candidate.rationale) + "</p>";
+              const champApprouves = document.querySelector('#form-approbation textarea[name="approved_fields"]');
+              if (champApprouves && !champApprouves.value.trim()) champApprouves.value = data.candidate.suggested_fields.join("\n");
+            }
+          } catch (e) {
+            erreur.textContent = e.message;
+            erreur.hidden = false;
+          }
+        });
+
+        document.getElementById("form-approbation").addEventListener("submit", async (event) => {
+          event.preventDefault();
+          const erreur = erreurDe("erreur-approbation");
+          erreur.hidden = true;
+          const fd = new FormData(event.target);
+          const taskId = fd.get("task_id");
+          if (!taskId) { erreur.textContent = "Choisissez une tâche."; erreur.hidden = false; return; }
+          const approved_fields = String(fd.get("approved_fields") || "").split("\n").map((s) => s.trim()).filter(Boolean);
+          try {
+            await api("/api/oracles/" + encodeURIComponent(taskId) + "/approve", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ approved_fields, unexpected_field_policy: fd.get("unexpected_field_policy") }),
+            });
+            await naviguer();
+          } catch (e) {
+            erreur.textContent = e.message;
+            erreur.hidden = false;
+          }
+        });
+      },
+    };
+  }
+
   // ---- Routeur ------------------------------------------------------------------
 
   function analyserRoute() {
@@ -544,6 +735,7 @@
     const params = new URLSearchParams(requete || "");
     const parts = chemin.split("/").filter(Boolean).map(decodeURIComponent);
     if (!parts.length || parts[0] === "campagnes") return { nom: "campagnes" };
+    if (parts[0] === "connecter") return { nom: "connecter" };
     if (parts[0] === "comparer") return { nom: "comparer", before: parseInt(parts[1], 10) || null, after: parseInt(parts[2], 10) || null };
     if (parts[0] === "campagne" && parts[1]) {
       const id = parseInt(parts[1], 10);
@@ -576,6 +768,7 @@
       else if (route.nom === "essai") vue = await vueEssai(route.id, route.taskId, route.trialId);
       else if (route.nom === "securite") vue = await vueSecurite(route.id);
       else if (route.nom === "cout") vue = await vueCout(route.id);
+      else if (route.nom === "connecter") vue = await vueConnecter();
       else vue = await vueComparer(route.before, route.after);
       if (monJeton !== jeton) return;
       feuille.innerHTML = vue.html;

@@ -25,7 +25,7 @@ import os
 import threading
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -37,10 +37,17 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from agricam_reliable_agents import __version__
+from agricam_reliable_agents.connector.contract_inference import infer_oracle_candidate
+from agricam_reliable_agents.connector.oracle_repository import (
+    AgentConnectionRecord,
+    OracleRepository,
+    TaskOracle,
+)
 from agricam_reliable_agents.models.data_models import (
     AttackCategory,
     ReliabilityReport,
     Task,
+    TaskComplexity,
 )
 from agricam_reliable_agents.persistence.engine import (
     database_url_from_env,
@@ -57,6 +64,9 @@ from agricam_reliable_agents.reliability.stats import (
     pass_k_interval,
     wilson_score_interval,
 )
+
+CONNECTOR_TYPES = ("rest", "mcp", "direct_model", "cli")
+ENVIRONMENTS = ("test", "staging", "production")
 
 STATIC_DIR = Path(__file__).parent / "static"
 DEFAULT_K_MAX = 10
@@ -292,6 +302,41 @@ COMPARE_LABELS = {
 }
 
 
+def _connection_row(c: AgentConnectionRecord) -> dict[str, Any]:
+    return {
+        "id": c.id,
+        "connector_type": c.connector_type,
+        "environment": c.environment,
+        "config": c.config,
+        "credential_ref": c.credential_ref,
+        "created_at": _iso(c.created_at),
+    }
+
+
+def _oracle_row(o: TaskOracle) -> dict[str, Any]:
+    return {
+        "task_id": o.task_id,
+        "verification_method": o.verification_method,
+        "approved_fields": list(o.approved_fields),
+        "unexpected_field_policy": o.unexpected_field_policy,
+        "inferred": o.inferred,
+        "validated_by_human": o.validated_by_human,
+        "validated_at": _iso(o.validated_at) if o.validated_at else None,
+    }
+
+
+def _task_row(task: Task, oracle: TaskOracle | None) -> dict[str, Any]:
+    return {
+        "task_id": task.id,
+        "prompt": task.prompt,
+        "category": task.category,
+        "complexity": task.complexity.value,
+        "complexity_label": COMPLEXITY_LABELS.get(task.complexity.value, "inconnue"),
+        "expected_state_delta": dict(task.expected_state_delta),
+        "oracle": _oracle_row(oracle) if oracle else None,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -302,6 +347,10 @@ def _repo(request: Request) -> ReliabilityRepository:
 
 def _launcher(request: Request) -> CampaignLauncher:
     return request.app.state.launcher
+
+
+def _oracles(request: Request) -> OracleRepository:
+    return request.app.state.oracle_repository
 
 
 def _campaign_or_404(repo: ReliabilityRepository, campaign_id: int) -> CampaignRecord:
@@ -550,6 +599,154 @@ async def compare_campaigns(request: Request) -> JSONResponse:
     })
 
 
+
+
+
+# ---------------------------------------------------------------------------
+# Connecter un agent (section 5 du document de référence)
+#
+# Portée assumée : cette API permet de déclarer une connexion d'agent, de
+# définir une tâche, d'obtenir une proposition d'oracle (assistance,
+# jamais une validation) et d'enregistrer l'approbation humaine explicite
+# d'un oracle. Elle ne lance PAS de campagne réelle contre un connecteur
+# tiers (REST/MCP/CLI/appel direct modèle) depuis le serveur HTTP — ce qui
+# exigerait d'exposer de vrais appels réseau ou sous-processus déclenchés
+# par une requête web, hors périmètre de cette interface. Les campagnes
+# affichées ailleurs restent celles de `CampaignLauncher` (agent simulé).
+# ---------------------------------------------------------------------------
+
+async def list_connections(request: Request) -> JSONResponse:
+    return JSONResponse({"connections": [_connection_row(c) for c in _oracles(request).list_connections()]})
+
+
+async def create_connection(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+    except ValueError as exc:
+        raise HTTPException(400, "Le corps de la requête doit être du JSON.") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Le corps de la requête doit être un objet JSON.")
+
+    connection_id = body.get("id")
+    connector_type = body.get("connector_type")
+    environment = body.get("environment")
+    config = body.get("config", {})
+    credential_ref = body.get("credential_ref")
+
+    if not isinstance(connection_id, str) or not connection_id.strip():
+        raise HTTPException(400, "L'identifiant de connexion est obligatoire.")
+    if connector_type not in CONNECTOR_TYPES:
+        raise HTTPException(400, f"connector_type doit être l'un de : {', '.join(CONNECTOR_TYPES)}.")
+    if environment not in ENVIRONMENTS:
+        raise HTTPException(400, f"environment doit être l'un de : {', '.join(ENVIRONMENTS)}.")
+    if not isinstance(config, dict):
+        raise HTTPException(400, "config doit être un objet JSON.")
+    if credential_ref is not None and not isinstance(credential_ref, str):
+        raise HTTPException(400, "credential_ref doit être une chaîne (une référence, jamais un secret en clair).")
+
+    try:
+        record = _oracles(request).save_connection(
+            connection_id.strip(), connector_type=connector_type, environment=environment,
+            config=config, credential_ref=credential_ref,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return JSONResponse(_connection_row(record), status_code=201)
+
+
+async def list_tasks(request: Request) -> JSONResponse:
+    repo, oracles = _repo(request), _oracles(request)
+    rows = [_task_row(task, oracles.get_oracle(task.id)) for task in repo.list_tasks()]
+    return JSONResponse({"tasks": rows})
+
+
+async def create_task(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+    except ValueError as exc:
+        raise HTTPException(400, "Le corps de la requête doit être du JSON.") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Le corps de la requête doit être un objet JSON.")
+
+    task_id = body.get("id")
+    prompt = body.get("prompt")
+    complexity = body.get("complexity")
+    category = body.get("category")
+    expected_state_delta = body.get("expected_state_delta", {})
+    verification_query = body.get("verification_query")
+
+    if not isinstance(task_id, str) or not task_id.strip():
+        raise HTTPException(400, "L'identifiant de tâche est obligatoire.")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise HTTPException(400, "Le prompt de la tâche est obligatoire.")
+    if complexity not in {c.value for c in TaskComplexity}:
+        allowed = ", ".join(c.value for c in TaskComplexity)
+        raise HTTPException(400, f"complexity doit être l'un de : {allowed}.")
+    if not isinstance(category, str) or not category.strip():
+        raise HTTPException(400, "La catégorie de la tâche est obligatoire.")
+    if not isinstance(expected_state_delta, dict):
+        raise HTTPException(400, "expected_state_delta doit être un objet JSON.")
+    if not isinstance(verification_query, str) or not verification_query.strip():
+        raise HTTPException(400, "verification_query est obligatoire.")
+
+    task = Task(
+        id=task_id.strip(), prompt=prompt, complexity=TaskComplexity(complexity), category=category,
+        expected_state_delta=expected_state_delta, verification_query=verification_query,
+    )
+    _repo(request).record_task(task)
+    return JSONResponse({"id": task.id}, status_code=201)
+
+
+async def infer_oracle(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+    except ValueError as exc:
+        raise HTTPException(400, "Le corps de la requête doit être du JSON.") from exc
+    tool_schema = body.get("tool_schema") if isinstance(body, dict) else None
+    candidate = infer_oracle_candidate(tool_schema)
+    if candidate is None:
+        return JSONResponse({"candidate": None})
+    return JSONResponse({
+        "candidate": {"suggested_fields": list(candidate.suggested_fields), "rationale": candidate.rationale},
+    })
+
+
+async def approve_oracle(request: Request) -> JSONResponse:
+    task_id = request.path_params["task_id"]
+    repo, oracles = _repo(request), _oracles(request)
+    if repo.get_task(task_id) is None:
+        raise HTTPException(404, "Cette tâche n'existe pas : définissez-la avant d'en approuver l'oracle.")
+
+    try:
+        body = await request.json()
+    except ValueError as exc:
+        raise HTTPException(400, "Le corps de la requête doit être du JSON.") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Le corps de la requête doit être un objet JSON.")
+
+    approved_fields = body.get("approved_fields")
+    verification_method = body.get("verification_method", "manual")
+    unexpected_field_policy = body.get("unexpected_field_policy", "flag")
+    inferred = body.get("inferred", False)
+
+    if not isinstance(approved_fields, list) or not approved_fields or not all(
+        isinstance(f, str) and f.strip() for f in approved_fields
+    ):
+        raise HTTPException(400, "approved_fields doit être une liste non vide de noms de champs.")
+    if unexpected_field_policy not in ("flag", "ignore"):
+        raise HTTPException(400, "unexpected_field_policy doit être 'flag' ou 'ignore'.")
+    if not isinstance(inferred, bool):
+        raise HTTPException(400, "inferred doit être un booléen.")
+
+    oracle = TaskOracle(
+        task_id=task_id, verification_method=verification_method, approved_fields=tuple(approved_fields),
+        unexpected_field_policy=unexpected_field_policy, inferred=inferred,
+        validated_by_human=True, validated_at=datetime.now(timezone.utc),
+    )
+    oracles.save_oracle(oracle)
+    return JSONResponse(_oracle_row(oracle), status_code=201)
+
+
 async def index(request: Request) -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
@@ -571,12 +768,19 @@ def create_app(database_url: str | None = None, *, background_runs: bool = True)
             Route("/api/campaigns/{campaign_id}/trials/{task_id}/{trial_id}", get_trial),
             Route("/api/campaigns/{campaign_id}/incidents", get_incidents),
             Route("/api/campaigns/{campaign_id}/costs", get_costs),
+            Route("/api/connections", list_connections, methods=["GET"]),
+            Route("/api/connections", create_connection, methods=["POST"]),
+            Route("/api/tasks", list_tasks, methods=["GET"]),
+            Route("/api/tasks", create_task, methods=["POST"]),
+            Route("/api/oracles/infer", infer_oracle, methods=["POST"]),
+            Route("/api/oracles/{task_id}/approve", approve_oracle, methods=["POST"]),
             Mount("/static", StaticFiles(directory=STATIC_DIR), name="static"),
         ],
         exception_handlers={HTTPException: http_error},
     )
     app.state.database_url = url
     app.state.repository = ReliabilityRepository.from_url(url)
+    app.state.oracle_repository = OracleRepository(app.state.repository.engine)
     app.state.launcher = CampaignLauncher(url, background=background_runs)
     return app
 
