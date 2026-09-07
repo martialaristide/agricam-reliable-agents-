@@ -131,16 +131,18 @@ class WrongValueMutation:
 # Application des mutations à AgriCamDataStore (store en mémoire)
 # ---------------------------------------------------------------------------
 
-def _write_snapshot_field(store: AgriCamDataStore, key: str, value: Any) -> None:
+def write_snapshot_field(store: AgriCamDataStore, key: str, value: Any) -> None:
     """
     Écrit directement `value` à l'emplacement désigné par une clé au
     format `AgriCamDataStore.snapshot()` (`"diagnostic.<id>.status"`,
     `"product.<id>.stock_qty"`, `"farmer.<id>.notified_count"`).
 
-    Utilitaire d'AUDIT, volontairement couplé à AgriCam et à son store en
-    mémoire (accède à des attributs privés du store) : contrairement au
-    reste du projet, ce module a besoin d'un point d'injection que
-    l'interface publique de `DataStore` n'a — et ne doit — pas exposer
+    Utilitaire d'AUDIT/DE SIMULATION, volontairement couplé à AgriCam et à
+    son store en mémoire (accède à des attributs privés du store) :
+    contrairement au reste du projet, ce module (et `connector/environment.py`,
+    qui le réutilise pour le mode dry-run de la Tâche 6 — même mécanisme,
+    « répondre succès sans rien faire ») a besoin d'un point d'injection
+    que l'interface publique de `DataStore` n'a — et ne doit — pas exposer
     (personne ne devrait pouvoir écrire un état arbitraire en production).
     Clé non reconnue : ignorée silencieusement (rien à corrompre).
     """
@@ -193,9 +195,9 @@ class MutatedAgriCamTools:
                 after = self.store.snapshot()
                 for key, value in before.items():
                     if after.get(key) != value:
-                        _write_snapshot_field(self.store, key, value)
+                        write_snapshot_field(self.store, key, value)
             elif isinstance(mutation, WrongValueMutation):
-                _write_snapshot_field(self.store, mutation.field_key, mutation.wrong_value)
+                write_snapshot_field(self.store, mutation.field_key, mutation.wrong_value)
             result = mutation.apply(tool_name, result)
 
         return result
