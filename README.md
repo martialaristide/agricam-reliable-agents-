@@ -3,15 +3,18 @@
 Implémentation de référence du cœur technique du projet **AgriCam Reliable
 Agents** : modèles de données, outils MCP (serveur réel, transport stdio),
 boucle agent ReAct, harnais de fiabilité (pass^k), Success Verifier,
-couche de sécurité, persistance SQL des campagnes et dashboard Streamlit.
+couche de sécurité, persistance SQL des campagnes, dashboard Streamlit,
+interface de vérification sur mesure, et **Connecteur d'Agent Générique**
+(brancher n'importe quel agent — AgriCam ou tiers — sur ce harnais).
 
 ## État de vérification
 
 Tout le code de ce dépôt a été **réellement exécuté** (pas seulement
 rédigé) au moment de la livraison :
 
-- ✅ 178 tests unitaires et d'intégration, tous passants
-- ✅ 99 % de couverture de code (`pytest-cov`)
+- ✅ 356 tests unitaires et d'intégration, tous passants
+- ✅ 99 % de couverture de code (`pytest-cov`), chaque module du
+  connecteur individuellement ≥ 98 %
 - ✅ 0 avertissement `ruff` (lint complet)
 - ✅ Scripts de démonstration et de campagne exécutés bout en bout
 - ✅ Dashboard rendu sans erreur via `streamlit.testing.v1.AppTest`
@@ -20,6 +23,10 @@ rédigé) au moment de la livraison :
 - ✅ Audit expert indépendant (7 septembre 2026) : 2 défauts bloquants,
   9 importants et 11 mineurs relevés, tous corrigés et verrouillés par
   `tests/test_audit_fixes.py`
+- ✅ Connecteur d'Agent Générique (12 tâches, Phases A à E) : chaque
+  garantie de sécurité (validation d'oracle, mode dry-run) verrouillée
+  par un test qui tente explicitement de la contourner par appel direct
+  de fonction Python
 
 Seul l'appel réseau de `AnthropicLLMClient` (agent/llm_client.py) n'est pas
 exercé par les tests : il nécessite une clé `ANTHROPIC_API_KEY` valide. Le
@@ -224,6 +231,88 @@ réels en mémoire et en sous-processus stdio ; `tests/test_mcp_server_env.py`
 vérifie la sélection du store par `AGRICAM_DATABASE_URL`, y compris en
 sous-processus avec persistance dans un fichier SQLite.
 
+## Connecter un agent tiers
+
+Le harnais de fiabilité (`reliability/harness.py`) était déjà générique :
+il ne dépend que de deux contrats abstraits (`AgentRunner`,
+`StateSnapshotFn`). Le **Connecteur d'Agent Générique**
+(`src/agricam_reliable_agents/connector/`) fournit l'outillage qui
+manquait pour lui brancher n'importe quel agent — AgriCam ou tiers,
+déployé ou non — sans modifier le harnais, le Success Verifier, les
+statistiques ni la garde de sécurité.
+
+Quatre adaptateurs (`AgentConnector`, contrat `send(prompt, trial_id) ->
+RawAgentReply`) : appel direct d'un modèle (`direct_model_adapter.py`),
+REST/HTTP (`rest_adapter.py`), client MCP (`mcp_client_adapter.py`),
+sous-processus isolé (`cli_adapter.py`, `shell=False` systématique,
+timeout obligatoire). Format exact attendu par chacun, oracle par
+approbation de diff, environnements et mode dry-run :
+`src/agricam_reliable_agents/connector/README.md`.
+
+Exemple minimal, exécuté tel quel (aucune clé API requise) :
+
+```python
+from agricam_reliable_agents.agent.llm_client import LLMResponse
+from agricam_reliable_agents.connector.bridge import agent_connector_as_runner
+from agricam_reliable_agents.connector.direct_model_adapter import DirectModelAdapter
+from agricam_reliable_agents.models.data_models import Task, TaskComplexity
+from agricam_reliable_agents.reliability.harness import HarnessConfig, evaluate_task
+
+
+class MonAgentTiersFactice:
+    """Un agent tiers imaginaire : répond toujours la même chose."""
+
+    def generate(self, messages: list[dict], tool_schemas: list[dict]) -> LLMResponse:
+        return LLMResponse(tool_call=None, final_text="Bonjour, tout va bien.")
+
+
+tache = Task(
+    id="T-DEMO", prompt="Dis bonjour.", complexity=TaskComplexity.LEVEL_1,
+    category="demo", expected_state_delta={}, verification_query="q-demo",
+)
+
+connecteur = DirectModelAdapter(MonAgentTiersFactice(), system_prompt="Tu es poli.")
+agent_runner = agent_connector_as_runner(connecteur)
+
+rapport = evaluate_task(
+    tache, agent_runner, state_snapshot_fn=lambda t: {},
+    config=HarnessConfig(n_trials=5, k_values=(1, 3)),
+)
+print(f"p_hat = {rapport.p_hat:.3f}, pass^3 = {rapport.pass_k[3]:.3f}")
+```
+
+Pour un agent qui affecte un vrai état (pas seulement une réponse
+texte), définir l'oracle par **approbation de diff** plutôt que d'écrire
+`expected_state_delta` de mémoire — voir `connector/README.md`, section
+« Définir un oracle ».
+
+### Fondations et garanties (corrections de la Tâche 0)
+
+Avant d'ajouter `agent_connections`/`task_oracles`, trois fondations SQL
+ont été corrigées (`persistence/engine.py`, `reliability/repository.py`) :
+contrainte d'unicité sur les essais, `PRAGMA foreign_keys=ON` réellement
+appliqué sur SQLite (les clés étrangères existantes étaient jusque-là
+purement décoratives), `cost_usd` en `Numeric(12, 6)` pour une agrégation
+de coûts sans dérive flottante.
+
+Deux garanties vérifiées par des tests qui tentent explicitement de les
+contourner par appel direct de fonction Python (jamais seulement via une
+interface) :
+
+- **Aucune campagne sans oracle validé** : `connector/orchestration.py`
+  rejette toute tâche dont `task_oracles.validated_by_human` n'est pas
+  vrai, y compris si on appelle `run_gated_campaign` directement.
+- **Aucun effet réel en mode dry-run** : `connector/environment.py`
+  neutralise les outils à effet de bord tout en laissant l'agent croire
+  à un succès — vérifié par une assertion d'état avant/après, pas
+  seulement par l'absence d'exception.
+
+L'audit de l'oracle par mutation ciblée (`connector/oracle_mutation.py`)
+prouve, lui, qu'un oracle approuvé DÉTECTE réellement une régression
+injectée à la frontière des outils — pas seulement qu'il « tourne sans
+erreur » : un oracle délibérément incomplet laisse un mutant survivre
+dans les tests, la preuve que l'audit fonctionne pour de vrai.
+
 ## Corrections issues de l'audit expert
 
 Un audit indépendant du code (7 septembre 2026) a relevé et fait corriger :
@@ -273,12 +362,22 @@ src/agricam_reliable_agents/
 ├── verifier/                   # Success Verifier (diff d'état)
 ├── security/                   # Policy, guard, sanitizer (OWASP LLM)
 ├── persistence/engine.py       # Fabrique de moteur (AGRICAM_DATABASE_URL)
+├── connector/                  # Connecteur d'Agent Générique (voir son README)
+│   ├── base.py, bridge.py      # AgentConnector, pont vers AgentRunner
+│   ├── direct_model_adapter.py, rest_adapter.py,
+│   │   mcp_client_adapter.py, cli_adapter.py  # Les 4 adaptateurs
+│   ├── oracle_repository.py    # agent_connections, task_oracles
+│   ├── oracle_approval.py      # Oracle par approbation de diff
+│   ├── oracle_mutation.py      # Audit de l'oracle par mutation ciblée
+│   ├── orchestration.py        # Garde validated_by_human
+│   ├── environment.py          # Environnements + mode dry-run
+│   └── contract_inference.py   # Inférence de contrat (mode assisté)
 └── dashboard/                  # Requêtes pandas + thème Plotly
 dashboard/app.py                # Application Streamlit
 scripts/demo_full_pipeline.py   # Démonstration numérique sans API
 scripts/run_campaign.py         # Campagne persistée (LLM simulé ou Anthropic)
 docs/interface/plan-de-design.md # Passe 1 du brief interface (tokens, wireframes, auto-critique)
-tests/                          # 178 tests, 99 % de couverture
+tests/                          # 356 tests, 99 % de couverture
 ```
 
 ## Licence
